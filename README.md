@@ -7,7 +7,9 @@
 
 An intelligent, production-ready system that uses Deep Learning and Computer Vision to automatically track student attendance and monitor engagement in real-time classroom environments.
 
-![Dashboard Preview](https://via.placeholder.com/800x400?text=Dashboard+Preview)
+## 📸 Dashboard Preview
+
+![Dashboard](static/images/dashboard.png)
 
 ## 🌟 Features
 
@@ -137,11 +139,11 @@ Real-Time-Face-Attendance-System/
    Create folders for each student in the `dataset/` directory:
    ```
    dataset/
-   ├── John_Doe/
+   ├── Prince_Kumar/
    │   ├── photo1.jpg
    │   ├── photo2.jpg
    │   └── photo3.jpg
-   ├── Jane_Smith/
+   ├── Ritik_Kumar/
    │   ├── photo1.jpg
    │   └── photo2.jpg
    ```
@@ -339,11 +341,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 📞 Support
 
 For issues, questions, or contributions:
-- Open an [Issue](https://github.com/yourusername/Real-Time-Face-Attendance-System/issues)
-- Email: your.email@example.com
+- Open an [Issue](https://github.com/theprincepratap/Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System/issues)
+- Email: theprincepratap@gmail.com
 
 ---
 
 <p align="center">
-  Made with ❤️ for the education sector
+  Made with ❤️ for the education sector By Prince Kuar 
 </p>
