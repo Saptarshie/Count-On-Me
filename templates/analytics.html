@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+
+{% block title %}Analytics - Attendance System{% endblock %}
+
+{% block extra_css %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h2><i class="bi bi-graph-up"></i> Analytics Dashboard</h2>
+        <p class="text-muted">Detailed insights and statistics</p>
+    </div>
+</div>
+
+<!-- Summary Stats -->
+<div class="row mb-4">
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="card border-primary">
+            <div class="card-body">
+                <h6 class="text-muted">Total Students</h6>
+                <h2 class="text-primary">{{ stats.total_students or 0 }}</h2>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="card border-success">
+            <div class="card-body">
+                <h6 class="text-muted">Today's Attendance</h6>
+                <h2 class="text-success">{{ "%.1f"|format(stats.attendance_percentage or 0) }}%</h2>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="card border-warning">
+            <div class="card-body">
+                <h6 class="text-muted">Avg Engagement</h6>
+                <h2 class="text-warning">{{ "%.1f"|format(stats.average_engagement or 0) }}%</h2>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="card border-info">
+            <div class="card-body">
+                <h6 class="text-muted">Active Sessions</h6>
+                <h2 class="text-info">{{ engagement|length }}</h2>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Charts Row -->
+<div class="row mb-4">
+    <div class="col-lg-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-pie-chart"></i> Attendance Distribution</h5>
+            </div>
+            <div class="card-body">
+                <canvas id="attendanceChart"></canvas>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-bar-chart"></i> Engagement by Student</h5>
+            </div>
+            <div class="card-body">
+                <canvas id="engagementChart"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Engagement Status Distribution -->
+<div class="row mb-4">
+    <div class="col-lg-8">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-activity"></i> Engagement Status Summary</h5>
+            </div>
+            <div class="card-body">
+                <canvas id="statusChart"></canvas>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card h-100">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-info-circle"></i> Quick Stats</h5>
+            </div>
+            <div class="card-body">
+                <ul class="list-group list-group-flush">
+                    <li class="list-group-item d-flex justify-content-between">
+                        <span>Attentive Students</span>
+                        <span class="badge bg-success" id="attentive-count">0</span>
+                    </li>
+                    <li class="list-group-item d-flex justify-content-between">
+                        <span>Distracted Students</span>
+                        <span class="badge bg-warning" id="distracted-count">0</span>
+                    </li>
+                    <li class="list-group-item d-flex justify-content-between">
+                        <span>Sleeping Students</span>
+                        <span class="badge bg-danger" id="sleeping-count">0</span>
+                    </li>
+                    <li class="list-group-item d-flex justify-content-between">
+                        <span>Class Engagement</span>
+                        <span class="badge bg-info" id="class-engagement">0%</span>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Per-Student Details -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-person-lines-fill"></i> Student Engagement Details</h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>Student</th>
+                                <th>Avg Engagement</th>
+                                <th>Attentive %</th>
+                                <th>Distracted %</th>
+                                <th>Sleeping %</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="student-details">
+                            {% for name, data in engagement.items() %}
+                            <tr>
+                                <td><strong>{{ name }}</strong></td>
+                                <td>
+                                    <div class="progress" style="height: 20px;">
+                                        <div class="progress-bar bg-info" style="width: {{ data.average_engagement or 0 }}%">
+                                            {{ "%.1f"|format(data.average_engagement or 0) }}%
+                                        </div>
+                                    </div>
+                                </td>
+                                <td>{{ "%.1f"|format(data.attentive_percentage or 0) }}%</td>
+                                <td>{{ "%.1f"|format(data.distracted_percentage or 0) }}%</td>
+                                <td>{{ "%.1f"|format(data.sleeping_percentage or 0) }}%</td>
+                                <td>
+                                    {% set avg = data.average_engagement or 0 %}
+                                    {% if avg >= 70 %}
+                                    <span class="badge bg-success">Attentive</span>
+                                    {% elif avg >= 40 %}
+                                    <span class="badge bg-warning">Distracted</span>
+                                    {% else %}
+                                    <span class="badge bg-danger">Sleeping</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="6" class="text-center text-muted">No engagement data available</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // Attendance Pie Chart
+    const attendanceCtx = document.getElementById('attendanceChart').getContext('2d');
+    new Chart(attendanceCtx, {
+        type: 'doughnut',
+        data: {
+            labels: ['Present', 'Absent'],
+            datasets: [{
+                data: [{{ stats.present_count or 0 }}, {{ stats.absent_count or 0 }}],
+                backgroundColor: ['#198754', '#dc3545'],
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: { position: 'bottom' }
+            }
+        }
+    });
+    
+    // Engagement Bar Chart
+    const engagementData = {{ engagement | tojson | safe }};
+    const names = Object.keys(engagementData);
+    const scores = names.map(n => engagementData[n].average_engagement || 0);
+    
+    const engagementCtx = document.getElementById('engagementChart').getContext('2d');
+    new Chart(engagementCtx, {
+        type: 'bar',
+        data: {
+            labels: names.length > 0 ? names : ['No Data'],
+            datasets: [{
+                label: 'Engagement Score',
+                data: scores.length > 0 ? scores : [0],
+                backgroundColor: scores.map(s => s >= 70 ? '#198754' : s >= 40 ? '#ffc107' : '#dc3545'),
+            }]
+        },
+        options: {
+            responsive: true,
+            scales: {
+                y: { beginAtZero: true, max: 100 }
+            }
+        }
+    });
+    
+    // Status Chart
+    let attentive = 0, distracted = 0, sleeping = 0;
+    for (const data of Object.values(engagementData)) {
+        const avg = data.average_engagement || 0;
+        if (avg >= 70) attentive++;
+        else if (avg >= 40) distracted++;
+        else sleeping++;
+    }
+    
+    const statusCtx = document.getElementById('statusChart').getContext('2d');
+    new Chart(statusCtx, {
+        type: 'bar',
+        data: {
+            labels: ['Attentive', 'Distracted', 'Sleeping'],
+            datasets: [{
+                label: 'Students',
+                data: [attentive, distracted, sleeping],
+                backgroundColor: ['#198754', '#ffc107', '#dc3545'],
+            }]
+        },
+        options: {
+            responsive: true,
+            indexAxis: 'y'
+        }
+    });
+    
+    // Update counts
+    document.getElementById('attentive-count').textContent = attentive;
+    document.getElementById('distracted-count').textContent = distracted;
+    document.getElementById('sleeping-count').textContent = sleeping;
+    
+    const totalEngagement = names.length > 0 ? 
+        scores.reduce((a, b) => a + b, 0) / scores.length : 0;
+    document.getElementById('class-engagement').textContent = totalEngagement.toFixed(1) + '%';
+</script>
+{% endblock %}

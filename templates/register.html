@@ -1,0 +1,256 @@
+{% extends "base.html" %}
+
+{% block title %}Register Student - Attendance System{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h2><i class="bi bi-person-plus"></i> Register New Student</h2>
+        <p class="text-muted">Add a new student and capture face images</p>
+    </div>
+</div>
+
+<div class="row">
+    <!-- Registration Form -->
+    <div class="col-lg-6 mb-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-person-badge"></i> Student Information</h5>
+            </div>
+            <div class="card-body">
+                <form id="registration-form">
+                    <div class="mb-3">
+                        <label class="form-label">Full Name *</label>
+                        <input type="text" class="form-control" name="name" id="student-name" required 
+                               placeholder="Enter student's full name">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Student ID</label>
+                        <input type="text" class="form-control" name="student_id" 
+                               placeholder="Auto-generated if empty">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Email</label>
+                        <input type="email" class="form-control" name="email" 
+                               placeholder="student@example.com">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Department</label>
+                        <select class="form-select" name="department">
+                            <option value="">Select Department</option>
+                            <option value="Computer Science">Computer Science</option>
+                            <option value="Electronics">Electronics</option>
+                            <option value="Mechanical">Mechanical</option>
+                            <option value="Civil">Civil</option>
+                            <option value="Other">Other</option>
+                        </select>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Face Capture -->
+    <div class="col-lg-6 mb-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-camera"></i> Face Capture</h5>
+            </div>
+            <div class="card-body">
+                <div class="text-center mb-3">
+                    <video id="video-preview" width="100%" autoplay muted class="rounded border"></video>
+                </div>
+                
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between mb-2">
+                        <span>Captured Images:</span>
+                        <span id="capture-count">0 / 10</span>
+                    </div>
+                    <div class="progress" style="height: 25px;">
+                        <div class="progress-bar progress-bar-striped" id="capture-progress" style="width: 0%">
+                            0%
+                        </div>
+                    </div>
+                </div>
+                
+                <div id="captured-images" class="d-flex flex-wrap gap-2 mb-3">
+                    <!-- Captured thumbnails will appear here -->
+                </div>
+                
+                <div class="alert alert-info" id="capture-instructions">
+                    <i class="bi bi-info-circle"></i> 
+                    Click "Start Capture" and slowly move your head in different directions
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Action Buttons -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <a href="{{ url_for('students') }}" class="btn btn-outline-secondary">
+                        <i class="bi bi-arrow-left"></i> Back to Students
+                    </a>
+                    <div>
+                        <button id="btn-start-capture" class="btn btn-primary" onclick="startCapture()">
+                            <i class="bi bi-camera"></i> Start Capture
+                        </button>
+                        <button id="btn-stop-capture" class="btn btn-warning" onclick="stopCapture()" disabled>
+                            <i class="bi bi-stop"></i> Stop Capture
+                        </button>
+                        <button id="btn-submit" class="btn btn-success" onclick="submitRegistration()" disabled>
+                            <i class="bi bi-check-lg"></i> Complete Registration
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    let video = document.getElementById('video-preview');
+    let stream = null;
+    let captureInterval = null;
+    let capturedImages = [];
+    const maxImages = 10;
+    
+    // Initialize camera
+    async function initCamera() {
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { width: 640, height: 480 } 
+            });
+            video.srcObject = stream;
+        } catch (err) {
+            console.error('Camera error:', err);
+            document.getElementById('capture-instructions').innerHTML = 
+                '<i class="bi bi-exclamation-triangle"></i> Could not access camera. Please check permissions.';
+            document.getElementById('capture-instructions').className = 'alert alert-danger';
+        }
+    }
+    
+    function startCapture() {
+        const name = document.getElementById('student-name').value;
+        if (!name) {
+            alert('Please enter student name first');
+            return;
+        }
+        
+        document.getElementById('btn-start-capture').disabled = true;
+        document.getElementById('btn-stop-capture').disabled = false;
+        
+        capturedImages = [];
+        updateCaptureUI();
+        
+        captureInterval = setInterval(captureImage, 500);
+    }
+    
+    function stopCapture() {
+        if (captureInterval) {
+            clearInterval(captureInterval);
+            captureInterval = null;
+        }
+        
+        document.getElementById('btn-start-capture').disabled = false;
+        document.getElementById('btn-stop-capture').disabled = true;
+        
+        if (capturedImages.length >= maxImages) {
+            document.getElementById('btn-submit').disabled = false;
+        }
+    }
+    
+    function captureImage() {
+        if (capturedImages.length >= maxImages) {
+            stopCapture();
+            return;
+        }
+        
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext('2d').drawImage(video, 0, 0);
+        
+        const imageData = canvas.toDataURL('image/jpeg', 0.8);
+        capturedImages.push(imageData);
+        
+        updateCaptureUI();
+    }
+    
+    function updateCaptureUI() {
+        const count = capturedImages.length;
+        const percent = (count / maxImages) * 100;
+        
+        document.getElementById('capture-count').textContent = `${count} / ${maxImages}`;
+        document.getElementById('capture-progress').style.width = `${percent}%`;
+        document.getElementById('capture-progress').textContent = `${percent.toFixed(0)}%`;
+        
+        // Update thumbnails
+        const container = document.getElementById('captured-images');
+        container.innerHTML = capturedImages.map((img, i) => 
+            `<img src="${img}" class="rounded" style="width: 60px; height: 60px; object-fit: cover;">`
+        ).join('');
+        
+        if (count >= maxImages) {
+            document.getElementById('capture-instructions').innerHTML = 
+                '<i class="bi bi-check-circle"></i> Face capture complete! Click "Complete Registration" to finish.';
+            document.getElementById('capture-instructions').className = 'alert alert-success';
+        }
+    }
+    
+    async function submitRegistration() {
+        const form = document.getElementById('registration-form');
+        const formData = new FormData(form);
+        const data = Object.fromEntries(formData);
+        
+        if (capturedImages.length < maxImages) {
+            alert('Please capture all face images first');
+            return;
+        }
+        
+        document.getElementById('btn-submit').disabled = true;
+        document.getElementById('btn-submit').innerHTML = 
+            '<span class="spinner-border spinner-border-sm"></span> Processing...';
+        
+        try {
+            // First, add student to database
+            const studentResponse = await fetch('/api/students', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            });
+            
+            if (!studentResponse.ok) {
+                throw new Error('Failed to add student');
+            }
+            
+            // Note: In a production system, you'd send images to be saved and encoded
+            // For now, we'll show a success message
+            alert('Student registered successfully! Please add face images to the dataset folder and run encoding.');
+            window.location.href = '/students';
+            
+        } catch (error) {
+            alert('Error during registration: ' + error.message);
+            document.getElementById('btn-submit').disabled = false;
+            document.getElementById('btn-submit').innerHTML = 
+                '<i class="bi bi-check-lg"></i> Complete Registration';
+        }
+    }
+    
+    // Initialize on page load
+    initCamera();
+    
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', () => {
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+        }
+    });
+</script>
+{% endblock %}

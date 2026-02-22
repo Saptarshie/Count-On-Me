@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block title %}Attendance Records - Attendance System{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h2><i class="bi bi-calendar-check"></i> Attendance Records</h2>
+                <p class="text-muted">View and manage attendance history</p>
+            </div>
+            <div>
+                <a href="{{ url_for('api_export_csv') }}" class="btn btn-outline-primary">
+                    <i class="bi bi-download"></i> Export CSV
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Date Filter -->
+<div class="row mb-4">
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-body">
+                <form method="GET" class="d-flex gap-2">
+                    <input type="date" name="date" class="form-control" value="{{ selected_date }}" onchange="this.form.submit()">
+                </form>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-8">
+        <div class="card bg-light">
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col-4">
+                        <h4 class="text-success mb-0">{{ records|length }}</h4>
+                        <small class="text-muted">Present</small>
+                    </div>
+                    <div class="col-4">
+                        <h4 class="text-info mb-0">
+                            {% if records %}
+                                {{ "%.1f"|format(records|map(attribute='engagement_score')|list|sum / records|length) }}%
+                            {% else %}
+                                0%
+                            {% endif %}
+                        </h4>
+                        <small class="text-muted">Avg Engagement</small>
+                    </div>
+                    <div class="col-4">
+                        <h4 class="text-primary mb-0">{{ selected_date }}</h4>
+                        <small class="text-muted">Selected Date</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Attendance Table -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-table"></i> Attendance Records</h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover table-striped" id="attendance-table">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>#</th>
+                                <th>Student Name</th>
+                                <th>Date</th>
+                                <th>Time</th>
+                                <th>Engagement Score</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for record in records %}
+                            <tr>
+                                <td>{{ loop.index }}</td>
+                                <td>
+                                    <strong>{{ record.student_name }}</strong>
+                                </td>
+                                <td>{{ record.date }}</td>
+                                <td>{{ record.time }}</td>
+                                <td>
+                                    <div class="progress" style="height: 20px; min-width: 100px;">
+                                        {% set score = record.engagement_score %}
+                                        <div class="progress-bar {% if score >= 70 %}bg-success{% elif score >= 40 %}bg-warning{% else %}bg-danger{% endif %}" 
+                                             style="width: {{ score }}%">
+                                            {{ "%.0f"|format(score) }}%
+                                        </div>
+                                    </div>
+                                </td>
+                                <td>
+                                    <span class="badge bg-success">{{ record.status }}</span>
+                                </td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-info" title="View Details">
+                                        <i class="bi bi-eye"></i>
+                                    </button>
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="7" class="text-center py-5">
+                                    <i class="bi bi-inbox fs-1 text-muted"></i>
+                                    <p class="text-muted mb-0">No attendance records for this date</p>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

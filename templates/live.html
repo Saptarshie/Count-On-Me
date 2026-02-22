@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+
+{% block title %}Live Feed - Attendance System{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h2><i class="bi bi-broadcast"></i> Live Video Feed</h2>
+                <p class="text-muted">Real-time face detection and recognition</p>
+            </div>
+            <div>
+                <button id="btn-start" class="btn btn-success" onclick="startSystem()">
+                    <i class="bi bi-play-fill"></i> Start
+                </button>
+                <button id="btn-stop" class="btn btn-danger" onclick="stopSystem()" disabled>
+                    <i class="bi bi-stop-fill"></i> Stop
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <!-- Video Feed -->
+    <div class="col-lg-8 mb-4">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="bi bi-camera-video"></i> Camera Feed</h5>
+                <span id="fps-counter" class="badge bg-info">FPS: --</span>
+            </div>
+            <div class="card-body p-0">
+                <div class="video-container position-relative">
+                    <img id="video-feed" src="{{ url_for('video_feed') }}" class="w-100" alt="Video Feed">
+                    <div id="video-overlay" class="position-absolute top-0 start-0 w-100 h-100 d-flex align-items-center justify-content-center bg-dark bg-opacity-75" style="display: none !important;">
+                        <div class="text-center text-white">
+                            <div class="spinner-border mb-3" role="status"></div>
+                            <p>Starting camera...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Side Panel -->
+    <div class="col-lg-4">
+        <!-- Detection Stats -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-people"></i> Detected Faces</h5>
+            </div>
+            <div class="card-body" id="detected-faces">
+                <p class="text-muted text-center">No faces detected</p>
+            </div>
+        </div>
+        
+        <!-- Recent Activity -->
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-clock-history"></i> Recent Activity</h5>
+            </div>
+            <div class="card-body">
+                <ul class="list-group list-group-flush" id="activity-log">
+                    <li class="list-group-item text-muted text-center">No recent activity</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Controls -->
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-sliders"></i> Settings</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label">Detection Confidence</label>
+                        <input type="range" class="form-range" min="0" max="100" value="50" id="confidence-slider">
+                        <small class="text-muted">Current: <span id="confidence-value">50</span>%</small>
+                    </div>
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label">Recognition Threshold</label>
+                        <input type="range" class="form-range" min="0" max="100" value="60" id="recognition-slider">
+                        <small class="text-muted">Current: <span id="recognition-value">60</span>%</small>
+                    </div>
+                    <div class="col-md-4 mb-3">
+                        <label class="form-check-label">Options</label>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="show-landmarks" checked>
+                            <label class="form-check-label" for="show-landmarks">Show Face Mesh</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="auto-attendance" checked>
+                            <label class="form-check-label" for="auto-attendance">Auto Mark Attendance</label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    const activityLog = [];
+    const maxLogItems = 10;
+    
+    function addActivity(message) {
+        const time = new Date().toLocaleTimeString();
+        activityLog.unshift({ time, message });
+        if (activityLog.length > maxLogItems) {
+            activityLog.pop();
+        }
+        
+        const container = document.getElementById('activity-log');
+        container.innerHTML = activityLog.map(item => 
+            `<li class="list-group-item d-flex justify-content-between">
+                <span>${item.message}</span>
+                <small class="text-muted">${item.time}</small>
+            </li>`
+        ).join('');
+    }
+    
+    function updateLiveStats() {
+        fetch('/api/stats')
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('fps-counter').textContent = `FPS: ${(data.fps || 0).toFixed(1)}`;
+                
+                // Update buttons
+                if (data.is_running) {
+                    document.getElementById('btn-start').disabled = true;
+                    document.getElementById('btn-stop').disabled = false;
+                } else {
+                    document.getElementById('btn-start').disabled = false;
+                    document.getElementById('btn-stop').disabled = true;
+                }
+            })
+            .catch(console.error);
+        
+        // Update engagement/detected faces
+        fetch('/api/engagement')
+            .then(response => response.json())
+            .then(data => {
+                const container = document.getElementById('detected-faces');
+                const names = Object.keys(data);
+                
+                if (names.length === 0) {
+                    container.innerHTML = '<p class="text-muted text-center">No faces detected</p>';
+                    return;
+                }
+                
+                let html = '<ul class="list-group">';
+                for (const [name, metrics] of Object.entries(data)) {
+                    const status = metrics.status || 'Unknown';
+                    const score = (metrics.engagement_score || 0).toFixed(0);
+                    let badgeClass = 'bg-success';
+                    if (status === 'Distracted') badgeClass = 'bg-warning';
+                    if (status === 'Sleeping') badgeClass = 'bg-danger';
+                    
+                    html += `
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            <div>
+                                <strong>${name}</strong><br>
+                                <small class="text-muted">${score}% engaged</small>
+                            </div>
+                            <span class="badge ${badgeClass}">${status}</span>
+                        </li>
+                    `;
+                }
+                html += '</ul>';
+                container.innerHTML = html;
+            })
+            .catch(console.error);
+    }
+    
+    // Slider updates
+    document.getElementById('confidence-slider').addEventListener('input', function() {
+        document.getElementById('confidence-value').textContent = this.value;
+    });
+    
+    document.getElementById('recognition-slider').addEventListener('input', function() {
+        document.getElementById('recognition-value').textContent = this.value;
+    });
+    
+    // Periodic updates
+    setInterval(updateLiveStats, 1000);
+    updateLiveStats();
+</script>
+{% endblock %}

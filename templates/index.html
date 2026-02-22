@@ -1,0 +1,246 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Attendance System{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h2><i class="bi bi-speedometer2"></i> Dashboard</h2>
+        <p class="text-muted">Real-time overview of attendance and engagement</p>
+    </div>
+</div>
+
+<!-- Stats Cards -->
+<div class="row mb-4">
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="card bg-success text-white h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h6 class="card-title mb-0">Present Today</h6>
+                        <h2 class="mb-0" id="present-count">{{ stats.present_count or 0 }}</h2>
+                    </div>
+                    <i class="bi bi-person-check fs-1"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="card bg-danger text-white h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h6 class="card-title mb-0">Absent Today</h6>
+                        <h2 class="mb-0" id="absent-count">{{ stats.absent_count or 0 }}</h2>
+                    </div>
+                    <i class="bi bi-person-x fs-1"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="card bg-info text-white h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h6 class="card-title mb-0">Attendance %</h6>
+                        <h2 class="mb-0" id="attendance-pct">{{ "%.1f"|format(stats.attendance_percentage or 0) }}%</h2>
+                    </div>
+                    <i class="bi bi-pie-chart fs-1"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="card bg-warning text-dark h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h6 class="card-title mb-0">Avg Engagement</h6>
+                        <h2 class="mb-0" id="avg-engagement">{{ "%.1f"|format(stats.average_engagement or 0) }}%</h2>
+                    </div>
+                    <i class="bi bi-activity fs-1"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Quick Actions -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-lightning"></i> Quick Actions</h5>
+            </div>
+            <div class="card-body">
+                <div class="d-flex flex-wrap gap-2">
+                    <button id="btn-start" class="btn btn-success" onclick="startSystem()">
+                        <i class="bi bi-play-fill"></i> Start System
+                    </button>
+                    <button id="btn-stop" class="btn btn-danger" onclick="stopSystem()" disabled>
+                        <i class="bi bi-stop-fill"></i> Stop System
+                    </button>
+                    <a href="{{ url_for('live') }}" class="btn btn-primary">
+                        <i class="bi bi-broadcast"></i> View Live Feed
+                    </a>
+                    <a href="{{ url_for('api_export_csv') }}" class="btn btn-outline-secondary">
+                        <i class="bi bi-download"></i> Export CSV
+                    </a>
+                    <button class="btn btn-outline-primary" onclick="encodeDataset()">
+                        <i class="bi bi-cpu"></i> Re-encode Faces
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Today's Attendance Table -->
+<div class="row">
+    <div class="col-lg-8 mb-4">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="bi bi-list-check"></i> Today's Attendance</h5>
+                <span class="badge bg-primary">{{ stats.date or 'N/A' }}</span>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover" id="attendance-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Time</th>
+                                <th>Engagement</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for student in stats.student_stats or [] %}
+                            <tr>
+                                <td>{{ student.name }}</td>
+                                <td>{{ student.time }}</td>
+                                <td>
+                                    <div class="progress" style="height: 20px;">
+                                        <div class="progress-bar {% if student.engagement_score >= 70 %}bg-success{% elif student.engagement_score >= 40 %}bg-warning{% else %}bg-danger{% endif %}" 
+                                             style="width: {{ student.engagement_score }}%">
+                                            {{ "%.0f"|format(student.engagement_score) }}%
+                                        </div>
+                                    </div>
+                                </td>
+                                <td>
+                                    <span class="badge bg-success">{{ student.status }}</span>
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="4" class="text-center text-muted">No attendance records yet</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Real-time Engagement -->
+    <div class="col-lg-4 mb-4">
+        <div class="card h-100">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-graph-up-arrow"></i> Live Engagement</h5>
+            </div>
+            <div class="card-body" id="live-engagement">
+                <div class="text-center text-muted py-5">
+                    <i class="bi bi-broadcast fs-1"></i>
+                    <p>Start the system to see live engagement</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // Update stats periodically
+    function updateStats() {
+        fetch('/api/stats')
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('present-count').textContent = data.present_count || 0;
+                document.getElementById('absent-count').textContent = data.absent_count || 0;
+                document.getElementById('attendance-pct').textContent = (data.attendance_percentage || 0).toFixed(1) + '%';
+                document.getElementById('avg-engagement').textContent = (data.average_engagement || 0).toFixed(1) + '%';
+                
+                // Update system status
+                const statusBadge = document.getElementById('system-status');
+                if (data.is_running) {
+                    statusBadge.className = 'badge bg-success me-2';
+                    statusBadge.innerHTML = '<i class="bi bi-circle-fill"></i> Running';
+                    document.getElementById('btn-start').disabled = true;
+                    document.getElementById('btn-stop').disabled = false;
+                } else {
+                    statusBadge.className = 'badge bg-secondary me-2';
+                    statusBadge.innerHTML = '<i class="bi bi-circle-fill"></i> Offline';
+                    document.getElementById('btn-start').disabled = false;
+                    document.getElementById('btn-stop').disabled = true;
+                }
+            })
+            .catch(console.error);
+    }
+    
+    // Update engagement data
+    function updateEngagement() {
+        fetch('/api/engagement')
+            .then(response => response.json())
+            .then(data => {
+                const container = document.getElementById('live-engagement');
+                
+                if (Object.keys(data).length === 0) {
+                    container.innerHTML = `
+                        <div class="text-center text-muted py-5">
+                            <i class="bi bi-broadcast fs-1"></i>
+                            <p>No students detected</p>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                let html = '';
+                for (const [name, metrics] of Object.entries(data)) {
+                    const score = metrics.engagement_score || 0;
+                    let colorClass = 'success';
+                    if (score < 70) colorClass = 'warning';
+                    if (score < 40) colorClass = 'danger';
+                    
+                    html += `
+                        <div class="mb-3">
+                            <div class="d-flex justify-content-between mb-1">
+                                <span class="fw-bold">${name}</span>
+                                <span class="badge bg-${colorClass}">${metrics.status}</span>
+                            </div>
+                            <div class="progress" style="height: 25px;">
+                                <div class="progress-bar bg-${colorClass}" style="width: ${score}%">
+                                    ${score.toFixed(0)}%
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+                container.innerHTML = html;
+            })
+            .catch(console.error);
+    }
+    
+    // Periodic updates
+    setInterval(updateStats, 2000);
+    setInterval(updateEngagement, 1000);
+    
+    // Initial update
+    updateStats();
+</script>
+{% endblock %}

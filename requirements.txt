@@ -1,0 +1,47 @@
+# =============================================================================
+# Real-Time Classroom Attendance and Student Engagement Tracking System
+# Requirements
+# =============================================================================
+
+# Core Dependencies
+# -----------------
+numpy>=1.21.0
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+
+# Face Detection & Recognition
+# ----------------------------
+mediapipe>=0.10.0
+deepface>=0.0.90
+tf-keras>=2.15.0
+
+# Web Framework
+# -------------
+Flask>=2.3.0
+Werkzeug>=2.3.0
+flask-cors>=4.0.0
+
+# Database
+# --------
+# SQLite is built into Python, no additional package needed
+
+# Utilities
+# ---------
+Pillow>=9.0.0
+
+# Optional: For better performance (uncomment if using GPU)
+# --------------------------------------------------------
+# tensorflow-gpu>=2.10.0
+
+# Optional: For deployment
+# ------------------------
+# gunicorn>=21.0.0
+# gevent>=23.0.0
+
+# Development Dependencies (optional)
+# -----------------------------------
+# pytest>=7.0.0
+# pytest-cov>=4.0.0
+# black>=23.0.0
+# flake8>=6.0.0
+# mypy>=1.0.0
