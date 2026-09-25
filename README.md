@@ -11,6 +11,10 @@ An intelligent, production-ready system that uses Deep Learning and Computer Vis
 
 ![Dashboard](static/images/dashboard.png)
 
+## 📊 Analytics Preview
+
+![Analytics](static/images/analytics.jpg)
+
 ## 🌟 Features
 
 ### 📸 Face Detection & Recognition

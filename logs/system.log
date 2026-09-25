@@ -3548,3 +3548,11 @@ jinja2.exceptions.TemplateNotFound: error.html
 2026-09-25 14:48:27 - werkzeug - INFO - 127.0.0.1 - - [25/Sep/2026 14:48:27] "GET /api/students HTTP/1.1" 200 -
 2026-09-25 14:48:36 - werkzeug - INFO - 127.0.0.1 - - [25/Sep/2026 14:48:36] "GET / HTTP/1.1" 200 -
 2026-09-25 14:49:02 - werkzeug - INFO - 127.0.0.1 - - [25/Sep/2026 14:49:02] "GET / HTTP/1.1" 200 -
+2026-09-25 20:13:35 - werkzeug - INFO - 127.0.0.1 - - [25/Sep/2026 20:13:35] "GET /api/attendance HTTP/1.1" 200 -
+2026-09-25 20:13:35 - werkzeug - INFO - 127.0.0.1 - - [25/Sep/2026 20:13:35] "GET /api/stats HTTP/1.1" 200 -
+2026-09-25 20:13:35 - werkzeug - INFO - 127.0.0.1 - - [25/Sep/2026 20:13:35] "GET /api/attendance HTTP/1.1" 200 -
+2026-09-25 20:13:35 - werkzeug - INFO - 127.0.0.1 - - [25/Sep/2026 20:13:35] "GET /api/stats HTTP/1.1" 200 -
+2026-09-25 20:13:35 - werkzeug - INFO - 127.0.0.1 - - [25/Sep/2026 20:13:35] "GET /api/engagement HTTP/1.1" 200 -
+2026-09-25 20:13:35 - werkzeug - INFO - 127.0.0.1 - - [25/Sep/2026 20:13:35] "GET /api/engagement HTTP/1.1" 200 -
+2026-09-25 20:13:35 - werkzeug - INFO - 127.0.0.1 - - [25/Sep/2026 20:13:35] "GET /api/unknown-faces HTTP/1.1" 200 -
+2026-09-25 20:13:35 - werkzeug - INFO - 127.0.0.1 - - [25/Sep/2026 20:13:35] "GET /api/unknown-faces HTTP/1.1" 200 -
