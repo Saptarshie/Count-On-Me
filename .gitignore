@@ -110,6 +110,7 @@ dist/
 *.egg-info/
 *.egg
 *.spec
+frontend/node_modules/
 
 # ==============================================================================
 # Student Face Datasets (Privacy & Storage)

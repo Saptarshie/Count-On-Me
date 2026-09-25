@@ -14,18 +14,21 @@ An intelligent, production-ready system that uses Deep Learning and Computer Vis
 ## 🌟 Features
 
 ### 📸 Face Detection & Recognition
+
 - **Multi-face Detection**: Detect up to 20+ faces simultaneously using MediaPipe
 - **Deep Learning Recognition**: 128D face embeddings using ResNet architecture
 - **Real-time Processing**: Optimized for CPU performance at 15-30 FPS
 - **Duplicate Prevention**: Smart cooldown system prevents multiple attendance marks
 
 ### 📊 Engagement Tracking
+
 - **Eye Aspect Ratio (EAR)**: Detect drowsiness and sleep
 - **Head Pose Estimation**: Track attention direction (yaw, pitch, roll)
 - **Blink Detection**: Monitor alertness through blink frequency
 - **Engagement Scoring**: 0-100 score with categorization (Attentive/Distracted/Sleeping)
 
 ### 🖼️ Multi-Image Batch Attendance & Face Deduplication
+
 - **Folder Input**: Process a folder of classroom photos in one shot
 - **Cross-Image Deduplication**: Cosine-similarity embedding matching merges the same student across photos — 12 photos with 87 faces correctly resolves to unique students
 - **Deduplication Report**: Images processed / faces detected / unique students / duplicates removed / unknown faces / avg similarity
@@ -34,28 +37,32 @@ An intelligent, production-ready system that uses Deep Learning and Computer Vis
 - **High-Resolution Safe**: Images processed one at a time, never loading the whole set into memory
 
 ### 🗳️ Temporal Recognition Voting
+
 - **Majority-Vote Acceptance**: An identity is only accepted after it wins a majority of votes over a sliding 5-observation window, filtering out one-frame recognition errors (blur, occlusion, extreme pose)
 - **Per-Track History**: Vote aggregation keyed by simple spatial face tracking
 
 ### ⚡ Adaptive Frame Skipping
-- **FPS-Aware Stride**: 
+
+- **FPS-Aware Stride**:
   - FPS > 20 → process every 3rd frame
   - FPS 10–20 → process every 2nd frame
   - FPS < 10 → process every frame
 - **Accuracy vs Latency Tradeoff**: Skips frames only when the pipeline has spare capacity
 
 ### ❓ Unknown Face Queue
+
 - **Auto-Capture**: Unrecognized faces are cropped and saved to `unknown/` with a per-track cooldown to prevent duplicates
 - **Teacher Review Dashboard**: Review unknown faces and register or ignore them from the dashboard
 - **One-Click Registration**: Registering an unknown face adds its encoding to the live recognizer instantly
 
-
 ### 🔐 Security Features
+
 - **Liveness Detection**: Blink-based verification prevents photo spoofing
 - **Secure Database**: SQLite with parameterized queries
 - **Configurable Thresholds**: Adjustable recognition confidence levels
 
 ### 📈 Dashboard & Analytics
+
 - **Real-time Dashboard**: Live video feed with face annotations
 - **Attendance Reports**: Daily/weekly/monthly attendance tracking
 - **Engagement Analytics**: Per-student and class-wide engagement metrics
@@ -149,23 +156,26 @@ Real-Time-Face-Attendance-System/
 ### Installation
 
 1. **Clone the repository**
+
    ```bash
-   git clone https://github.com/yourusername/Real-Time-Face-Attendance-System.git
-   cd Real-Time-Face-Attendance-System
+   git clone https://github.com/Saptarshie/Count-On-Me
+   cd Count-On-Me
    ```
 
 2. **Create virtual environment**
+
    ```bash
    python -m venv venv
-   
+
    # Windows
    venv\Scripts\activate
-   
+
    # Linux/macOS
    source venv/bin/activate
    ```
 
 3. **Install dependencies**
+
    ```bash
    pip install -r requirements.txt
    ```
@@ -173,24 +183,26 @@ Real-Time-Face-Attendance-System/
    > **Note**: First run will download face recognition models (~100MB). This is automatic and only happens once.
 
 4. **Prepare the dataset**
-   
+
    **Option A: Automatic Capture (Recommended)**
+
    ```bash
    python collect_dataset.py --name "John Doe"
    ```
-   
+
    The capture tool guides you through poses:
    - 😐 Look straight at camera
    - 👈👉 Turn head left/right
    - 👆👇 Look up/down
    - 😊 Smile / neutral expression
    - 🔄 Small head movements
-   
+
    **Controls:** `SPACE`=Capture, `A`=Auto-mode, `S`=Skip, `Q`=Quit
-   
+
    **Option B: Manual Photos**
-   
+
    Create folders for each student in the `dataset/` directory:
+
    ```
    dataset/
    ├── Prince_Kumar/
@@ -211,17 +223,19 @@ Real-Time-Face-Attendance-System/
    - Face should fill 15-30% of frame
 
 5. **Encode the faces**
+
    ```bash
    python main.py --encode
    ```
 
 6. **Run the application**
+
    ```bash
    python main.py
    ```
 
 7. **Open the dashboard**
-   
+
    Navigate to `http://localhost:5000` in your browser.
 
 ## 📖 Usage Guide
@@ -256,39 +270,41 @@ python main.py --help
 
 ### Web Interface
 
-| Page | Description |
-|------|-------------|
-| **Dashboard** | Overview with stats, quick actions, and recent attendance |
-| **Live Feed** | Real-time video with face detection and recognition |
-| **Attendance** | View and filter attendance records by date |
-| **Students** | Manage registered students |
-| **Analytics** | Detailed engagement charts and statistics |
-| **Register** | Add new students with face capture |
+| Page           | Description                                               |
+| -------------- | --------------------------------------------------------- |
+| **Dashboard**  | Overview with stats, quick actions, and recent attendance |
+| **Live Feed**  | Real-time video with face detection and recognition       |
+| **Attendance** | View and filter attendance records by date                |
+| **Students**   | Manage registered students                                |
+| **Analytics**  | Detailed engagement charts and statistics                 |
+| **Register**   | Add new students with face capture                        |
 
 ### API Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/start` | POST | Start the attendance system |
-| `/api/stop` | POST | Stop the attendance system |
-| `/api/stats` | GET | Get current statistics |
-| `/api/attendance` | GET | Get attendance records |
-| `/api/engagement` | GET | Get real-time engagement data |
-| `/api/students` | GET/POST | List or add students |
-| `/api/encode` | POST | Re-encode face dataset |
-| `/api/export/csv` | GET | Export attendance to CSV |
+| Endpoint          | Method   | Description                   |
+| ----------------- | -------- | ----------------------------- |
+| `/api/start`      | POST     | Start the attendance system   |
+| `/api/stop`       | POST     | Stop the attendance system    |
+| `/api/stats`      | GET      | Get current statistics        |
+| `/api/attendance` | GET      | Get attendance records        |
+| `/api/engagement` | GET      | Get real-time engagement data |
+| `/api/students`   | GET/POST | List or add students          |
+| `/api/encode`     | POST     | Re-encode face dataset        |
+| `/api/export/csv` | GET      | Export attendance to CSV      |
 
 ## ⚙️ Configuration
 
 All settings are in `config.py`. Key configurations:
 
 ### Detection Settings
+
 ```python
 min_detection_confidence = 0.5  # Face detection threshold
 max_faces = 20                   # Maximum faces per frame
 ```
 
 ### Recognition Settings
+
 ```python
 recognition_threshold = 0.6      # Face match threshold (lower = stricter)
 encoding_model = "large"         # 'small' or 'large'
@@ -296,6 +312,7 @@ attendance_cooldown_minutes = 30 # Prevent duplicate marking
 ```
 
 ### Engagement Settings
+
 ```python
 ear_threshold = 0.21            # Eye closure threshold
 yaw_threshold = 30.0            # Head rotation threshold
@@ -308,43 +325,49 @@ distracted_threshold = 40.0     # Score for "Distracted" status
 ### Common Issues
 
 **1. Camera not detected**
+
 ```bash
 # Check available cameras
 python -c "import cv2; print([cv2.VideoCapture(i).isOpened() for i in range(5)])"
 ```
 
 **2. dlib installation fails**
+
 - Install Visual Studio Build Tools (Windows)
 - Or use pre-built wheels from the community
 
 **3. Low FPS performance**
+
 - Reduce `max_faces` in config
 - Increase `frame_skip` value
 - Use a lower camera resolution
 
 **4. Recognition accuracy issues**
+
 - Add more training images per student (5-10 recommended)
 - Ensure good lighting in training images
 - Use front-facing photos with clear face visibility
 
 ## 📊 Performance
 
-| Metric | Value |
-|--------|-------|
-| Detection Speed | 20-30 FPS (CPU) |
-| Recognition Speed | 10-15 FPS (CPU) |
-| Max Faces | 20+ per frame |
-| Database | SQLite (scales to 10K+ records) |
+| Metric            | Value                           |
+| ----------------- | ------------------------------- |
+| Detection Speed   | 20-30 FPS (CPU)                 |
+| Recognition Speed | 10-15 FPS (CPU)                 |
+| Max Faces         | 20+ per frame                   |
+| Database          | SQLite (scales to 10K+ records) |
 
 ## 🚀 Deployment
 
 ### Local Deployment
+
 ```bash
 # Production mode
 python main.py --host 0.0.0.0 --port 80
 ```
 
 ### Docker Deployment
+
 ```dockerfile
 FROM python:3.10-slim
 
@@ -394,15 +417,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [DeepFace](https://github.com/serengil/deepface) - Face recognition & embeddings
 - [Flask](https://flask.palletsprojects.com/) - Web framework
 - [Bootstrap](https://getbootstrap.com/) - UI framework
-
-## 📞 Support
-
-For issues, questions, or contributions:
-- Open an [Issue](https://github.com/theprincepratap/Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System/issues)
-- Email: theprincepratap@gmail.com
-
----
-
-<p align="center">
-  Made with ❤️ for the education sector By Prince Kuar 
-</p>

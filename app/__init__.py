@@ -28,6 +28,10 @@ import io
 import shutil
 
 import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import config
@@ -45,6 +49,8 @@ from app.batch import BatchAttendanceProcessor
 # Initialize logging
 logger = get_logger(__name__)
 
+from flask_cors import CORS
+
 # Project root for templates and static files
 PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -54,6 +60,7 @@ app = Flask(
     template_folder=str(PROJECT_ROOT / 'templates'),
     static_folder=str(PROJECT_ROOT / 'static')
 )
+CORS(app, resources={r"/*": {"origins": "*"}})
 app.secret_key = config.flask.secret_key
 app.config['MAX_CONTENT_LENGTH'] = config.flask.max_content_length
 
@@ -437,15 +444,24 @@ def generate_video_stream():
         time.sleep(0.033)  # ~30 FPS
 
 
-# ============================================================================
-# Routes - Pages
-# ============================================================================
+FRONTEND_DIST = PROJECT_ROOT / 'frontend' / 'dist'
 
 @app.route('/')
 def index():
-    """Dashboard home page."""
+    """Dashboard home page: serves React SPA if built, else fallback template."""
+    if (FRONTEND_DIST / 'index.html').exists():
+        return send_from_directory(str(FRONTEND_DIST), 'index.html')
     stats = state.db_service.get_dashboard_stats() if state.db_service else {}
     return render_template('index.html', stats=stats)
+
+
+@app.route('/assets/<path:filename>')
+def spa_assets(filename):
+    """Serve built React frontend static assets."""
+    assets_dir = FRONTEND_DIST / 'assets'
+    if assets_dir.exists():
+        return send_from_directory(str(assets_dir), filename)
+    return ('Not found', 404)
 
 
 @app.route('/live')
@@ -635,6 +651,18 @@ def api_add_student():
     try:
         row_id = state.db_service.students.add_student(student)
         return jsonify({'status': 'success', 'id': row_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/students/<student_id>', methods=['DELETE'])
+def api_delete_student(student_id):
+    """Delete a student by student_id."""
+    if not state.db_service:
+        return jsonify({'error': 'Database not initialized'}), 500
+    try:
+        success = state.db_service.students.delete_student(student_id, soft_delete=False)
+        return jsonify({'status': 'success' if success else 'not_found'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
