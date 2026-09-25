@@ -3399,3 +3399,122 @@ jinja2.exceptions.TemplateNotFound: error.html
 2026-02-22 18:46:42 - werkzeug - INFO - 127.0.0.1 - - [22/Feb/2026 18:46:42] "GET /api/stats HTTP/1.1" 200 -
 2026-02-22 18:47:42 - werkzeug - INFO - 127.0.0.1 - - [22/Feb/2026 18:47:42] "GET /api/engagement HTTP/1.1" 200 -
 2026-02-22 18:47:42 - werkzeug - INFO - 127.0.0.1 - - [22/Feb/2026 18:47:42] "GET /api/stats HTTP/1.1" 200 -
+2026-09-25 14:25:23 - app.recognition - INFO - TemporalVotingRecognizer: window=5, min_votes=3
+2026-09-25 14:25:23 - app - INFO - Initializing system components...
+2026-09-25 14:25:23 - app.database - INFO - Database schema initialized
+2026-09-25 14:25:23 - app.database - INFO - DatabaseManager initialized with D:\prac_prog\fun\count_on_me\Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System\attendance.db
+2026-09-25 14:25:23 - app.database - INFO - DatabaseService initialized
+2026-09-25 14:25:23 - app.detection - INFO - Using OpenCV Haar Cascade for face detection
+2026-09-25 14:25:23 - app.detection - INFO - FaceDetector initialized with confidence=0.5, model_selection=1, max_faces=20
+2026-09-25 14:25:23 - app.recognition - INFO - FaceEncoder initialized with model=VGG-Face
+2026-09-25 14:25:23 - app.recognition - INFO - FaceEncoder initialized with model=VGG-Face
+2026-09-25 14:25:23 - app.recognition - INFO - DatasetEncoder initialized with dataset=D:\prac_prog\fun\count_on_me\Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System\dataset
+2026-09-25 14:25:23 - app.recognition - INFO - Loaded encodings for 3 students
+2026-09-25 14:25:23 - app.recognition - INFO - FaceRecognizer initialized with 60 known faces
+2026-09-25 14:25:23 - app.engagement - INFO - Using OpenCV fallback for engagement (limited features)
+2026-09-25 14:25:23 - app.engagement - INFO - FaceMeshAnalyzer initialized for 20 faces
+2026-09-25 14:25:23 - app.engagement - INFO - EngagementTracker initialized
+2026-09-25 14:25:23 - app.engagement - INFO - Using OpenCV fallback for engagement (limited features)
+2026-09-25 14:25:23 - app.engagement - INFO - FaceMeshAnalyzer initialized for 20 faces
+2026-09-25 14:25:23 - app.engagement - INFO - EngagementTracker initialized
+2026-09-25 14:25:23 - app - INFO - System components initialized successfully
+2026-09-25 14:25:23 - app.database - INFO - Added student: Sharukh_Khan
+2026-09-25 14:25:23 - app - INFO - Saved 4/4 images to D:\prac_prog\fun\count_on_me\Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System\dataset\Sharukh_Khan
+2026-09-25 14:25:23 - app.recognition - INFO - Loading VGG-Face model (first use)...
+2026-09-25 14:25:25 - urllib3.connectionpool - DEBUG - Starting new HTTPS connection (1): github.com:443
+2026-09-25 14:25:27 - urllib3.connectionpool - DEBUG - https://github.com:443 "GET /serengil/deepface_models/releases/download/v1.0/vgg_face_weights.h5 HTTP/1.1" 302 0
+2026-09-25 14:25:27 - urllib3.connectionpool - DEBUG - Starting new HTTPS connection (1): release-assets.githubusercontent.com:443
+2026-09-25 14:25:49 - urllib3.connectionpool - DEBUG - https://release-assets.githubusercontent.com:443 "GET /github-production-release-asset/382368840/6bf9ba80-db5a-11eb-8b48-84b0d02a64ec?sp=r&sv=2018-11-09&sr=b&spr=https&se=2026-09-25T09%3A48%3A51Z&rscd=attachment%3B+filename%3Dvgg_face_weights.h5&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2026-09-25T08%3A48%3A06Z&ske=2026-09-25T09%3A48%3A51Z&sks=b&skv=2018-11-09&sig=Cpl5u9wGZqIFvgrbkhEBU721qOiVN6P6gPDmEcjMujY%3D&jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmVsZWFzZS1hc3NldHMuZ2l0aHVidXNlcmNvbnRlbnQuY29tIiwia2V5Ijoia2V5MSIsImV4cCI6MTc5MDMzMDEyNSwibmJmIjoxNzkwMzI2NTI1LCJwYXRoIjoicmVsZWFzZWFzc2V0cHJvZHVjdGlvbi5ibG9iLmNvcmUud2luZG93cy5uZXQifQ.-kaxtOjjth_VFdZosG7jt-PQEaiW_0IOND4tXz-uK3U&response-content-disposition=attachment%3B%20filename%3Dvgg_face_weights.h5&response-content-type=application%2Foctet-stream HTTP/1.1" 200 580085408
+2026-09-25 14:27:58 - h5py._conv - DEBUG - Creating converter from 3 to 5
+2026-09-25 14:27:59 - app.recognition - INFO - VGG-Face model loaded successfully
+2026-09-25 14:28:02 - app.recognition - INFO - Encodings saved to D:\prac_prog\fun\count_on_me\Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System\models\encodings.pkl
+2026-09-25 14:28:02 - app.recognition - INFO - Added new student: Sharukh_Khan
+2026-09-25 14:28:02 - app - INFO - System cleanup complete
+2026-09-25 14:28:32 - app.recognition - INFO - TemporalVotingRecognizer: window=5, min_votes=3
+2026-09-25 14:28:32 - app - INFO - Initializing system components...
+2026-09-25 14:28:32 - app.database - INFO - Database schema initialized
+2026-09-25 14:28:32 - app.database - INFO - DatabaseManager initialized with D:\prac_prog\fun\count_on_me\Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System\attendance.db
+2026-09-25 14:28:32 - app.database - INFO - DatabaseService initialized
+2026-09-25 14:28:32 - app.detection - INFO - Using OpenCV Haar Cascade for face detection
+2026-09-25 14:28:32 - app.detection - INFO - FaceDetector initialized with confidence=0.5, model_selection=1, max_faces=20
+2026-09-25 14:28:32 - app.recognition - INFO - FaceEncoder initialized with model=VGG-Face
+2026-09-25 14:28:32 - app.recognition - INFO - FaceEncoder initialized with model=VGG-Face
+2026-09-25 14:28:32 - app.recognition - INFO - DatasetEncoder initialized with dataset=D:\prac_prog\fun\count_on_me\Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System\dataset
+2026-09-25 14:28:32 - app.recognition - INFO - Loaded encodings for 4 students
+2026-09-25 14:28:32 - app.recognition - INFO - FaceRecognizer initialized with 64 known faces
+2026-09-25 14:28:32 - app.engagement - INFO - Using OpenCV fallback for engagement (limited features)
+2026-09-25 14:28:32 - app.engagement - INFO - FaceMeshAnalyzer initialized for 20 faces
+2026-09-25 14:28:32 - app.engagement - INFO - EngagementTracker initialized
+2026-09-25 14:28:32 - app.engagement - INFO - Using OpenCV fallback for engagement (limited features)
+2026-09-25 14:28:32 - app.engagement - INFO - FaceMeshAnalyzer initialized for 20 faces
+2026-09-25 14:28:32 - app.engagement - INFO - EngagementTracker initialized
+2026-09-25 14:28:32 - app - INFO - System components initialized successfully
+2026-09-25 14:28:33 - app.detection - DEBUG - Detected 1 faces in frame
+2026-09-25 14:28:33 - app.recognition - INFO - Loading VGG-Face model (first use)...
+2026-09-25 14:28:34 - h5py._conv - DEBUG - Creating converter from 3 to 5
+2026-09-25 14:28:35 - app.recognition - INFO - VGG-Face model loaded successfully
+2026-09-25 14:28:35 - app.batch - INFO - img2.jpg: 1 face(s), 1 embedded
+2026-09-25 14:28:36 - app.batch - INFO - img3.jpg: 1 face(s), 1 embedded
+2026-09-25 14:28:36 - app.detection - DEBUG - Detected 1 faces in frame
+2026-09-25 14:28:36 - app.batch - INFO - img4.jpg: 1 face(s), 1 embedded
+2026-09-25 14:28:36 - app.database - INFO - Database schema initialized
+2026-09-25 14:28:36 - app.database - INFO - DatabaseManager initialized with D:\prac_prog\fun\count_on_me\Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System\attendance.db
+2026-09-25 14:28:36 - app.database - INFO - DatabaseService initialized
+2026-09-25 14:28:36 - app.database - INFO - Marked attendance for Sharukh_Khan
+2026-09-25 14:28:36 - app.batch - INFO - Batch CSV report saved to D:\prac_prog\fun\count_on_me\Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System\exports\attendance_2026-09-25.csv
+2026-09-25 14:28:36 - app - INFO - Batch attendance: 4 images, 3 faces, 1 unique, 2 duplicates removed
+2026-09-25 14:28:36 - app - ERROR - Batch attendance failed: Object of type int32 is not JSON serializable
+2026-09-25 14:28:36 - app - INFO - System cleanup complete
+2026-09-25 14:29:17 - app.recognition - INFO - TemporalVotingRecognizer: window=5, min_votes=3
+2026-09-25 14:29:17 - app - INFO - Initializing system components...
+2026-09-25 14:29:17 - app.database - INFO - Database schema initialized
+2026-09-25 14:29:17 - app.database - INFO - DatabaseManager initialized with D:\prac_prog\fun\count_on_me\Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System\attendance.db
+2026-09-25 14:29:17 - app.database - INFO - DatabaseService initialized
+2026-09-25 14:29:17 - app.detection - INFO - Using OpenCV Haar Cascade for face detection
+2026-09-25 14:29:17 - app.detection - INFO - FaceDetector initialized with confidence=0.5, model_selection=1, max_faces=20
+2026-09-25 14:29:17 - app.recognition - INFO - FaceEncoder initialized with model=VGG-Face
+2026-09-25 14:29:17 - app.recognition - INFO - FaceEncoder initialized with model=VGG-Face
+2026-09-25 14:29:17 - app.recognition - INFO - DatasetEncoder initialized with dataset=D:\prac_prog\fun\count_on_me\Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System\dataset
+2026-09-25 14:29:17 - app.recognition - INFO - Loaded encodings for 4 students
+2026-09-25 14:29:17 - app.recognition - INFO - FaceRecognizer initialized with 64 known faces
+2026-09-25 14:29:17 - app.engagement - INFO - Using OpenCV fallback for engagement (limited features)
+2026-09-25 14:29:17 - app.engagement - INFO - FaceMeshAnalyzer initialized for 20 faces
+2026-09-25 14:29:17 - app.engagement - INFO - EngagementTracker initialized
+2026-09-25 14:29:18 - app.engagement - INFO - Using OpenCV fallback for engagement (limited features)
+2026-09-25 14:29:18 - app.engagement - INFO - FaceMeshAnalyzer initialized for 20 faces
+2026-09-25 14:29:18 - app.engagement - INFO - EngagementTracker initialized
+2026-09-25 14:29:18 - app - INFO - System components initialized successfully
+2026-09-25 14:29:18 - app.detection - DEBUG - Detected 1 faces in frame
+2026-09-25 14:29:18 - app.recognition - INFO - Loading VGG-Face model (first use)...
+2026-09-25 14:29:20 - h5py._conv - DEBUG - Creating converter from 3 to 5
+2026-09-25 14:29:20 - app.recognition - INFO - VGG-Face model loaded successfully
+2026-09-25 14:29:21 - app.batch - INFO - img2.jpg: 1 face(s), 1 embedded
+2026-09-25 14:29:21 - app.batch - INFO - img3.jpg: 1 face(s), 1 embedded
+2026-09-25 14:29:21 - app.detection - DEBUG - Detected 1 faces in frame
+2026-09-25 14:29:22 - app.batch - INFO - img4.jpg: 1 face(s), 1 embedded
+2026-09-25 14:29:22 - app.database - INFO - Database schema initialized
+2026-09-25 14:29:22 - app.database - INFO - DatabaseManager initialized with D:\prac_prog\fun\count_on_me\Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System\attendance.db
+2026-09-25 14:29:22 - app.database - INFO - DatabaseService initialized
+2026-09-25 14:29:22 - app.batch - INFO - Batch CSV report saved to D:\prac_prog\fun\count_on_me\Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System\exports\attendance_2026-09-25.csv
+2026-09-25 14:29:22 - app - INFO - Batch attendance: 4 images, 3 faces, 1 unique, 2 duplicates removed
+2026-09-25 14:29:22 - app - INFO - System cleanup complete
+2026-09-25 14:29:53 - app.recognition - INFO - TemporalVotingRecognizer: window=5, min_votes=3
+2026-09-25 14:29:53 - app - INFO - Initializing system components...
+2026-09-25 14:29:53 - app.database - INFO - Database schema initialized
+2026-09-25 14:29:53 - app.database - INFO - DatabaseManager initialized with D:\prac_prog\fun\count_on_me\Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System\attendance.db
+2026-09-25 14:29:53 - app.database - INFO - DatabaseService initialized
+2026-09-25 14:29:53 - app.detection - INFO - Using OpenCV Haar Cascade for face detection
+2026-09-25 14:29:53 - app.detection - INFO - FaceDetector initialized with confidence=0.5, model_selection=1, max_faces=20
+2026-09-25 14:29:53 - app.recognition - INFO - FaceEncoder initialized with model=VGG-Face
+2026-09-25 14:29:53 - app.recognition - INFO - FaceEncoder initialized with model=VGG-Face
+2026-09-25 14:29:53 - app.recognition - INFO - DatasetEncoder initialized with dataset=D:\prac_prog\fun\count_on_me\Real-Time-Classroom-Attendance-and-Student-Engagement-Tracking-System\dataset
+2026-09-25 14:29:53 - app.recognition - INFO - Loaded encodings for 4 students
+2026-09-25 14:29:53 - app.recognition - INFO - FaceRecognizer initialized with 64 known faces
+2026-09-25 14:29:53 - app.engagement - INFO - Using OpenCV fallback for engagement (limited features)
+2026-09-25 14:29:53 - app.engagement - INFO - FaceMeshAnalyzer initialized for 20 faces
+2026-09-25 14:29:53 - app.engagement - INFO - EngagementTracker initialized
+2026-09-25 14:29:53 - app.engagement - INFO - Using OpenCV fallback for engagement (limited features)
+2026-09-25 14:29:53 - app.engagement - INFO - FaceMeshAnalyzer initialized for 20 faces
+2026-09-25 14:29:53 - app.engagement - INFO - EngagementTracker initialized
+2026-09-25 14:29:53 - app - INFO - System components initialized successfully
+2026-09-25 14:29:53 - app - INFO - System cleanup complete

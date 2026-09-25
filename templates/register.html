@@ -219,20 +219,23 @@
             '<span class="spinner-border spinner-border-sm"></span> Processing...';
         
         try {
-            // First, add student to database
-            const studentResponse = await fetch('/api/students', {
+            // Submit student info + captured face images in one call.
+            // Server saves images to dataset/<name>/ and encodes the faces
+            // so the student is immediately recognizable - no manual
+            // re-encode step needed.
+            const response = await fetch('/api/register-student', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(data)
+                body: JSON.stringify({...data, images: capturedImages})
             });
             
-            if (!studentResponse.ok) {
-                throw new Error('Failed to add student');
+            const result = await response.json();
+            
+            if (!response.ok) {
+                throw new Error(result.error || 'Registration failed');
             }
             
-            // Note: In a production system, you'd send images to be saved and encoded
-            // For now, we'll show a success message
-            alert('Student registered successfully! Please add face images to the dataset folder and run encoding.');
+            alert(result.message || 'Student registered successfully!');
             window.location.href = '/students';
             
         } catch (error) {

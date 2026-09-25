@@ -16,7 +16,8 @@ import cv2
 import numpy as np
 from flask import (
     Flask, render_template, Response, request, 
-    jsonify, redirect, url_for, flash, send_file
+    jsonify, redirect, url_for, flash, send_file,
+    send_from_directory
 )
 from datetime import datetime, date
 from pathlib import Path
@@ -24,19 +25,21 @@ import threading
 import time
 import logging
 import io
+import shutil
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import config
 from app.detection import FaceDetector, FaceDetection
-from app.recognition import FaceRecognizer, DatasetEncoder
+from app.recognition import FaceRecognizer, DatasetEncoder, TemporalVotingRecognizer
 from app.engagement import EngagementTracker, EngagementStatus, StudentEngagementAnalyzer
 from app.database import DatabaseService, Student, AttendanceRecord
 from app.utils import (
     CameraStream, setup_logging, get_logger, FPSCounter,
     draw_text_with_background, DatasetCollector
 )
+from app.batch import BatchAttendanceProcessor
 
 
 # Initialize logging
@@ -81,6 +84,16 @@ class SystemState:
         
         self.tracked_students = {}  # name -> last engagement metrics
         self.fps_counter = FPSCounter()
+        
+        # Adaptive frame skipping state
+        self._frame_counter = 0
+        self._adaptive_stride = config.detection.frame_skip
+        
+        # Temporal voting recognizer (per-face-track vote history)
+        self.temporal_recognizer = TemporalVotingRecognizer()
+        
+        # Unknown face queue (cropped faces saved for teacher review)
+        self._unknown_last_saved: dict = {}  # track_key -> datetime
         
         self._lock = threading.Lock()
         self._processing_thread = None
@@ -161,6 +174,17 @@ class SystemState:
                 
                 self.current_frame = frame.copy()
                 
+                # ----------------------------------------------------------
+                # ADAPTIVE FRAME SKIPPING
+                # Stride adapts to measured FPS: high FPS lets us skip more
+                # frames (latency budget), low FPS forces full processing.
+                # ----------------------------------------------------------
+                self._frame_counter += 1
+                if config.detection.adaptive_skip_enabled:
+                    self._update_adaptive_stride()
+                if self._frame_counter % max(1, self._adaptive_stride) != 0:
+                    continue
+                
                 # Process frame
                 processed = self._process_frame(frame)
                 
@@ -173,6 +197,28 @@ class SystemState:
             except Exception as e:
                 logger.error(f"Processing error: {e}")
                 time.sleep(0.1)
+    
+    def _update_adaptive_stride(self):
+        """
+        Select processing stride from current FPS:
+            FPS > 20 -> every 3rd frame
+            FPS 10-20 -> every 2nd frame
+            FPS < 10 -> every frame
+        This is an explicit accuracy-vs-latency tradeoff: skip only when
+        the pipeline has spare capacity.
+        """
+        fps = self.fps_counter.get_fps()
+        if fps > config.detection.adaptive_high_fps:
+            new_stride = config.detection.stride_high
+        elif fps > config.detection.adaptive_low_fps:
+            new_stride = config.detection.stride_mid
+        else:
+            new_stride = config.detection.stride_low
+        
+        if new_stride != self._adaptive_stride:
+            logger.debug(f"Adaptive stride: {self._adaptive_stride} -> {new_stride} "
+                          f"(FPS {fps:.1f})")
+            self._adaptive_stride = new_stride
     
     def _process_frame(self, frame: np.ndarray) -> np.ndarray:
         """Process a single frame."""
@@ -189,6 +235,10 @@ class SystemState:
         for idx, det in enumerate(detections):
             x, y, w, h = det.bbox
             
+            # Stable track key: spatially-bucketed centroid (simple tracker)
+            cx, cy = det.center
+            track_key = f"t{cx // 80}_{cy // 80}"
+            
             # Extract face for recognition
             face_img = self.detector.extract_face(frame, det)
             
@@ -196,13 +246,37 @@ class SystemState:
                 # Recognize face
                 result = self.recognizer.recognize(face_img)
                 
+                # ------------------------------------------------------
+                # TEMPORAL VOTING: aggregate observations per track and
+                # accept identity only on majority agreement.
+                # ------------------------------------------------------
+                if config.temporal.enabled:
+                    accepted_name = self.temporal_recognizer.observe(
+                        track_key, result.name, result.confidence
+                    )
+                    if accepted_name is None:
+                        # Not enough votes yet -> treat as unidentified
+                        is_known = False
+                    else:
+                        is_known = True
+                        result.name = accepted_name
+                else:
+                    is_known = result.is_known
+                
+                # ------------------------------------------------------
+                # UNKNOWN FACE QUEUE: save crops of unidentified faces
+                # for teacher review / later registration.
+                # ------------------------------------------------------
+                if not is_known:
+                    self._save_unknown_face(frame, det, track_key, result.confidence)
+                
                 # Get engagement for this face
                 engagement = None
                 if idx < len(engagement_results):
                     _, engagement = engagement_results[idx]
                 
                 # Draw bounding box with color based on recognition
-                if result.is_known:
+                if is_known:
                     color = (0, 255, 0)  # Green for known
                     name = result.name
                     
@@ -240,7 +314,7 @@ class SystemState:
                 )
                 
                 # Draw engagement if available
-                if engagement and result.is_known:
+                if engagement and is_known:
                     status_color = {
                         EngagementStatus.ATTENTIVE: (0, 255, 0),
                         EngagementStatus.DISTRACTED: (0, 165, 255),
@@ -275,6 +349,45 @@ class SystemState:
             if self.processed_frame is not None:
                 return self.processed_frame.copy()
         return None
+    
+    def _save_unknown_face(self, frame: np.ndarray, det: FaceDetection,
+                           track_key: str, similarity: float):
+        """
+        Save a cropped unknown face to the review queue.
+
+        Applies a per-track cooldown so one lingering stranger doesn't
+        flood the queue with hundreds of near-identical crops.
+        """
+        try:
+            if similarity < config.unknown_queue.min_confidence:
+                return
+            now = datetime.now()
+            last = self._unknown_last_saved.get(track_key)
+            if last and (now - last).total_seconds() < config.unknown_queue.cooldown_seconds:
+                return
+            
+            x, y, w, h = det.bbox
+            pad = int(min(w, h) * 0.2)
+            crop = frame[max(0, y - pad): y + h + pad,
+                         max(0, x - pad): x + w + pad]
+            if crop.size == 0:
+                return
+            
+            out_dir = Path(config.unknown_queue.dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Enforce max queue size (oldest first)
+            entries = sorted(out_dir.glob("*.jpg"))
+            while len(entries) >= config.unknown_queue.max_entries:
+                entries[0].unlink()
+                entries = entries[1:]
+            
+            filename = now.strftime("%Y-%m-%d_%H-%M-%S") + f"_{track_key}.jpg"
+            cv2.imwrite(str(out_dir / filename), crop)
+            self._unknown_last_saved[track_key] = now
+            logger.info(f"Unknown face saved: {filename}")
+        except Exception as e:
+            logger.error(f"Failed to save unknown face: {e}")
     
     def cleanup(self):
         """Cleanup all resources."""
@@ -574,6 +687,215 @@ def api_export_csv():
         mimetype='text/csv',
         headers={'Content-Disposition': f'attachment; filename=attendance_{date.today()}.csv'}
     )
+
+
+@app.route('/exports/<path:filename>')
+def exported_file(filename):
+    """Serve exported CSV reports."""
+    return send_from_directory(str(config.batch.export_dir), filename)
+
+
+@app.route('/api/batch-attendance', methods=['POST'])
+def api_batch_attendance():
+    """
+    Multi-image attendance with cross-image face deduplication.
+
+    Accepts JSON: {"folder": "<path to folder of classroom images>"}
+    Runs detection -> embeddings -> deduplication -> unique attendance,
+    marks identified students present, and exports a CSV report.
+    """
+    data = request.json
+    if not data or 'folder' not in data:
+        return jsonify({'error': 'folder is required'}), 400
+    
+    folder = Path(data['folder'])
+    if not folder.exists() or not folder.is_dir():
+        return jsonify({'error': f'Folder not found: {folder}'}), 400
+    
+    if not state.detector or not state.recognizer:
+        state.initialize()
+    
+    try:
+        processor = BatchAttendanceProcessor(
+            detector=state.detector, recognizer=state.recognizer
+        )
+        report = processor.process_folder(folder)
+        
+        if 'error' in report:
+            return jsonify(report), 400
+        
+        csv_path = processor.export_csv(report=report)
+        report['csv'] = csv_path
+        
+        logger.info(
+            f"Batch attendance: {report['images_processed']} images, "
+            f"{report['faces_detected']} faces, "
+            f"{report['unique_people']} unique, "
+            f"{report['duplicates_removed']} duplicates removed"
+        )
+        return jsonify(report)
+        
+    except Exception as e:
+        logger.error(f"Batch attendance failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/unknown-faces', methods=['GET'])
+def api_unknown_faces():
+    """List unknown faces saved in the review queue."""
+    out_dir = Path(config.unknown_queue.dir)
+    entries = []
+    if out_dir.exists():
+        for f in sorted(out_dir.glob("*.jpg"), reverse=True):
+            entries.append({
+                'filename': f.name,
+                'url': f'/unknown/{f.name}',
+                'created': datetime.fromtimestamp(f.stat().st_mtime).isoformat()
+            })
+    return jsonify({'unknown_faces': entries, 'count': len(entries)})
+
+
+@app.route('/unknown/<path:filename>')
+def unknown_face_image(filename):
+    """Serve an unknown-face crop image."""
+    out_dir = Path(config.unknown_queue.dir)
+    return send_from_directory(str(out_dir), filename)
+
+
+@app.route('/api/unknown-faces/register', methods=['POST'])
+def api_register_unknown():
+    """
+    Register an unknown face crop as a new student.
+    Copies the crop into the dataset and adds its encoding.
+    """
+    data = request.json
+    if not data or 'filename' not in data or 'name' not in data:
+        return jsonify({'error': 'filename and name are required'}), 400
+    
+    try:
+        src = Path(config.unknown_queue.dir) / data['filename']
+        if not src.exists():
+            return jsonify({'error': 'File not found'}), 404
+        
+        name = data['name'].strip()
+        student_dir = Path(config.recognition.dataset_path) / name
+        student_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Copy into dataset (kept for future re-encoding)
+        dst = student_dir / f"unknown_{src.stem}.jpg"
+        shutil.copy2(str(src), str(dst))
+        
+        # Encode this face and add to the live recognizer
+        image = cv2.imread(str(dst))
+        ok = state.recognizer.add_new_student(name, [image]) if image is not None else False
+        
+        if ok:
+            src.unlink()  # remove from queue
+            return jsonify({'status': 'success', 'message': f'Registered {name}'})
+        return jsonify({'error': 'No face found in crop'}), 400
+        
+    except Exception as e:
+        logger.error(f"Register unknown failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/unknown-faces/ignore', methods=['POST'])
+def api_ignore_unknown():
+    """Remove an unknown-face crop from the review queue."""
+    data = request.json
+    if not data or 'filename' not in data:
+        return jsonify({'error': 'filename is required'}), 400
+    
+    try:
+        src = Path(config.unknown_queue.dir) / data['filename']
+        if src.exists():
+            src.unlink()
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/register-student', methods=['POST'])
+def api_register_student():
+    """
+    Full student registration: DB record + face images + live encoding.
+
+    Accepts JSON:
+        {name, student_id?, email?, department?,
+         images: ["data:image/jpeg;base64,...", ...]}
+
+    Saves images to dataset/<name>/, adds the DB record, and encodes
+    the faces into the live recognizer immediately (no manual re-encode
+    step required).
+    """
+    data = request.json
+    if not data or 'name' not in data or not data.get('name', '').strip():
+        return jsonify({'error': 'Name is required'}), 400
+    if not data.get('images'):
+        return jsonify({'error': 'At least one face image is required'}), 400
+    
+    name = data['name'].strip()
+    images_b64 = data['images']
+    
+    if not state.db_service:
+        state.initialize()
+    
+    try:
+        # Decode base64 images (strip data-URL prefix if present)
+        import base64, re
+        images = []
+        for b64 in images_b64:
+            try:
+                if ',' in b64 and b64.strip().startswith('data:'):
+                    b64 = b64.split(',', 1)[1]
+                img_bytes = base64.b64decode(b64)
+                arr = np.frombuffer(img_bytes, dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if img is not None:
+                    images.append(img)
+            except Exception:
+                continue
+        
+        if not images:
+            return jsonify({'error': 'No valid face images received'}), 400
+        
+        # 1. Add student to database
+        student = Student(
+            student_id=data.get('student_id') or name.lower().replace(' ', '_'),
+            name=name,
+            email=data.get('email'),
+            department=data.get('department')
+        )
+        try:
+            state.db_service.students.add_student(student)
+        except Exception as e:
+            # Duplicate DB record is not fatal - face data still matters
+            logger.warning(f"DB add_student: {e}")
+        
+        # 2. Save images to dataset folder (source of truth for re-encoding)
+        student_dir = Path(config.recognition.dataset_path) / name
+        student_dir.mkdir(parents=True, exist_ok=True)
+        from datetime import datetime as _dt
+        timestamp = _dt.now().strftime('%Y%m%d_%H%M%S')
+        saved = 0
+        for i, img in enumerate(images):
+            path = student_dir / f"web_{timestamp}_{i:02d}.jpg"
+            if cv2.imwrite(str(path), img):
+                saved += 1
+        logger.info(f"Saved {saved}/{len(images)} images to {student_dir}")
+        
+        # 3. Encode faces and add to the live recognizer
+        encoded = state.recognizer.add_new_student(name, images) if state.recognizer else False
+        
+        return jsonify({
+            'status': 'success',
+            'message': f'Registered {name}: {saved} images saved, '
+                       f'{"face encoded" if encoded else "encoding failed - run Re-encode"}'
+        })
+        
+    except Exception as e:
+        logger.error(f"Registration failed: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 # ============================================================================

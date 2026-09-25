@@ -162,6 +162,73 @@
         </div>
     </div>
 </div>
+
+<!-- Unknown Faces Review Queue -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="bi bi-person-question"></i> Unknown Faces</h5>
+                <span class="badge bg-warning text-dark" id="unknown-count">0</span>
+            </div>
+            <div class="card-body">
+                <p class="text-muted small">
+                    Unrecognized faces captured during live sessions. Register them as
+                    students or ignore them.
+                </p>
+                <div class="row" id="unknown-faces-list">
+                    <div class="col-12 text-center text-muted py-4">
+                        No unknown faces captured yet
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Multi-Image Batch Attendance -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-collection"></i> Multi-Image Batch Attendance &amp; Deduplication</h5>
+            </div>
+            <div class="card-body">
+                <p class="text-muted small">
+                    Process a folder of classroom photos: faces are detected and embedded in
+                    every image, then deduplicated across images so each student is counted
+                    once, even if they appear in multiple photos.
+                </p>
+                <div class="input-group mb-3">
+                    <input type="text" class="form-control" id="batch-folder-input"
+                           placeholder="Path to folder of classroom images (e.g. classroom_photos/)">
+                    <button class="btn btn-primary" onclick="runBatchAttendance()">
+                        <i class="bi bi-play-fill"></i> Process Folder
+                    </button>
+                </div>
+                <div id="batch-result" class="mt-3" style="display:none;">
+                    <div class="row text-center mb-3">
+                        <div class="col-2"><h4 id="br-images">0</h4><small class="text-muted">Images</small></div>
+                        <div class="col-2"><h4 id="br-faces">0</h4><small class="text-muted">Faces</small></div>
+                        <div class="col-2"><h4 id="br-unique">0</h4><small class="text-muted">Unique</small></div>
+                        <div class="col-2"><h4 id="br-dupes">0</h4><small class="text-muted">Duplicates</small></div>
+                        <div class="col-2"><h4 id="br-unknown">0</h4><small class="text-muted">Unknown</small></div>
+                        <div class="col-2"><h4 id="br-sim">0.00</h4><small class="text-muted">Avg Sim</small></div>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-hover">
+                            <thead><tr><th>Student</th><th>Present</th><th>Occurrences</th><th>Confidence</th></tr></thead>
+                            <tbody id="batch-students-tbody"></tbody>
+                        </table>
+                    </div>
+                    <a id="batch-csv-link" class="btn btn-outline-secondary btn-sm" href="#" style="display:none;">
+                        <i class="bi bi-download"></i> Download CSV Report
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
@@ -236,11 +303,130 @@
             .catch(console.error);
     }
     
+    // Unknown faces review queue
+    function loadUnknownFaces() {
+        fetch('/api/unknown-faces')
+            .then(r => r.json())
+            .then(data => {
+                const list = document.getElementById('unknown-faces-list');
+                const count = document.getElementById('unknown-count');
+                count.textContent = data.count || 0;
+                
+                if (!data.unknown_faces || data.unknown_faces.length === 0) {
+                    list.innerHTML = '<div class="col-12 text-center text-muted py-4">No unknown faces captured yet</div>';
+                    return;
+                }
+                
+                let html = '';
+                data.unknown_faces.forEach((f, i) => {
+                    html += `
+                        <div class="col-md-3 col-sm-4 mb-3" id="uq-${i}">
+                            <div class="card">
+                                <img src="${f.url}" class="card-img-top" alt="Unknown face" style="height:140px;object-fit:cover;">
+                                <div class="card-body p-2">
+                                    <div class="input-group input-group-sm mb-2">
+                                        <input type="text" class="form-control uq-name" placeholder="Student name">
+                                    </div>
+                                    <div class="d-flex gap-1">
+                                        <button class="btn btn-success btn-sm flex-fill"
+                                                onclick="registerUnknown('${f.filename}', this)">Register</button>
+                                        <button class="btn btn-outline-secondary btn-sm"
+                                                onclick="ignoreUnknown('${f.filename}', ${i})">Ignore</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                });
+                list.innerHTML = html;
+            })
+            .catch(console.error);
+    }
+    
+    function registerUnknown(filename, btn) {
+        const nameInput = btn.closest('.card-body').querySelector('.uq-name');
+        const name = nameInput.value.trim();
+        if (!name) { nameInput.focus(); return; }
+        
+        fetch('/api/unknown-faces/register', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({filename: filename, name: name})
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'success') { loadUnknownFaces(); }
+            else { alert(data.error || 'Failed to register'); }
+        })
+        .catch(console.error);
+    }
+    
+    function ignoreUnknown(filename, idx) {
+        fetch('/api/unknown-faces/ignore', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({filename: filename})
+        })
+        .then(r => r.json())
+        .then(() => loadUnknownFaces())
+        .catch(console.error);
+    }
+    
+    // Multi-image batch attendance
+    function runBatchAttendance() {
+        const folder = document.getElementById('batch-folder-input').value.trim();
+        if (!folder) { alert('Enter a folder path'); return; }
+        
+        const result = document.getElementById('batch-result');
+        result.style.display = 'block';
+        document.getElementById('batch-students-tbody').innerHTML =
+            '<tr><td colspan="4" class="text-center"><span class="spinner-border spinner-border-sm"></span> Processing...</td></tr>';
+        
+        fetch('/api/batch-attendance', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({folder: folder})
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) {
+                document.getElementById('batch-students-tbody').innerHTML =
+                    `<tr><td colspan="4" class="text-danger text-center">${data.error}</td></tr>`;
+                return;
+            }
+            document.getElementById('br-images').textContent = data.images_processed;
+            document.getElementById('br-faces').textContent = data.faces_detected;
+            document.getElementById('br-unique').textContent = data.unique_people;
+            document.getElementById('br-dupes').textContent = data.duplicates_removed;
+            document.getElementById('br-unknown').textContent = data.unknown_faces;
+            document.getElementById('br-sim').textContent = data.avg_match_similarity;
+            
+            let rows = '';
+            data.students.forEach(s => {
+                rows += `<tr><td>${s.name}</td><td><span class="badge bg-success">YES</span></td><td>${s.occurrences}</td><td>${s.confidence}</td></tr>`;
+            });
+            data.unknown_details.forEach(u => {
+                rows += `<tr class="text-muted"><td>${u.cluster_id}</td><td><span class="badge bg-secondary">NO</span></td><td>${u.occurrences}</td><td>${u.avg_similarity}</td></tr>`;
+            });
+            if (!rows) rows = '<tr><td colspan="4" class="text-center text-muted">No faces detected</td></tr>';
+            document.getElementById('batch-students-tbody').innerHTML = rows;
+            
+            if (data.csv) {
+                const link = document.getElementById('batch-csv-link');
+                link.href = '/exports/' + data.csv.split(/[\\/]/).pop();
+                link.style.display = 'inline-block';
+            }
+            updateStats();
+        })
+        .catch(console.error);
+    }
+    
     // Periodic updates
     setInterval(updateStats, 2000);
     setInterval(updateEngagement, 1000);
     
     // Initial update
     updateStats();
+    loadUnknownFaces();
 </script>
 {% endblock %}

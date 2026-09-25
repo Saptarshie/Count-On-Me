@@ -666,6 +666,90 @@ class FaceRecognizer:
             return False
 
 
+class TemporalVotingRecognizer:
+    """
+    Temporal Voting Recognizer for live video streams.
+
+    Instead of trusting a single frame's recognition result, recent
+    observations are aggregated per face track and an identity is only
+    accepted once it accumulates a majority of votes within the
+    observation window.
+
+    Example:
+        Frame 1 -> Alice 0.81
+        Frame 2 -> Alice 0.85
+        Frame 3 -> Unknown
+        Frame 4 -> Alice 0.83
+        Frame 5 -> Alice 0.88
+        -> 4/5 votes for Alice => ACCEPT
+
+    This reduces one-frame recognition errors (blur, pose, partial
+    occlusion) at the cost of a small acceptance delay.
+    """
+
+    def __init__(self, window_frames: Optional[int] = None,
+                 min_votes: Optional[int] = None):
+        self.window = window_frames or config.temporal.window_frames
+        self.min_votes = min_votes or config.temporal.min_votes
+        self._votes: Dict[str, Dict[str, List[float]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        logger.info(
+            f"TemporalVotingRecognizer: window={self.window}, min_votes={self.min_votes}"
+        )
+
+    def observe(self, track_key: str, name: str, similarity: float) -> Optional[str]:
+        """
+        Record one observation for a face track and return the accepted
+        identity once the vote threshold is met.
+
+        Args:
+            track_key: stable identifier for the face track (e.g. bbox centroid bucket)
+            name: recognized name ('Unknown' if not identified)
+            similarity: recognition similarity score
+
+        Returns:
+            Accepted identity name, or None while votes are insufficient.
+        """
+        votes = self._votes[track_key][name]
+        votes.append(similarity)
+
+        # Keep only the most recent `window` observations per candidate name
+        all_names = self._votes[track_key]
+        for cand in all_names:
+            all_names[cand] = all_names[cand][-self.window:]
+
+        winner, count, avg_sim = self.get_consensus(track_key)
+        if winner and count >= self.min_votes:
+            return winner
+        return None
+
+    def get_consensus(self, track_key: str) -> Tuple[str, int, float]:
+        """
+        Get the current leading identity for a track.
+
+        Returns:
+            (name, vote_count, average_similarity) or ("", 0, 0.0)
+        """
+        track_votes = self._votes.get(track_key, {})
+        best_name, best_count, best_sim = "", 0, 0.0
+        for name, sims in track_votes.items():
+            # 'Unknown' observations carry no identity information
+            if name == "Unknown":
+                continue
+            if len(sims) > best_count:
+                best_name, best_count = name, len(sims)
+                best_sim = float(np.mean(sims)) if sims else 0.0
+        return best_name, best_count, best_sim
+
+    def reset(self, track_key: Optional[str] = None):
+        """Clear vote history for one track or all tracks."""
+        if track_key is None:
+            self._votes.clear()
+        else:
+            self._votes.pop(track_key, None)
+
+
 class LivenessDetector:
     """
     Liveness Detection to prevent spoofing with static images.

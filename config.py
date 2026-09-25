@@ -30,8 +30,46 @@ class DetectionConfig:
     max_faces: int = 20
     frame_skip: int = 2  # Process every nth frame for performance
     
+    # Adaptive frame skipping (FPS-based stride selection)
+    adaptive_skip_enabled: bool = True
+    adaptive_high_fps: float = 20.0   # above this -> process every 3rd frame
+    adaptive_low_fps: float = 10.0    # below this -> process every frame
+    stride_high: int = 3
+    stride_mid: int = 2
+    stride_low: int = 1
+    
     # Bounding box expansion factor
     bbox_expansion: float = 0.1
+
+
+@dataclass
+class TemporalVotingConfig:
+    """Configuration for temporal recognition voting."""
+    
+    enabled: bool = True
+    window_frames: int = 5     # number of recent observations considered
+    min_votes: int = 3         # majority votes required to accept identity
+
+
+@dataclass
+class BatchConfig:
+    """Configuration for multi-image batch attendance & deduplication."""
+    
+    dedup_threshold: float = 0.80     # cosine similarity above this = same person
+    max_images: int = 50              # safety cap per batch
+    min_face_size: int = 48           # ignore tiny faces (px)
+    export_dir: Path = BASE_DIR / "exports"
+    mark_attendance_in_db: bool = True
+
+
+@dataclass
+class UnknownQueueConfig:
+    """Configuration for the unknown-face review queue."""
+    
+    dir: Path = BASE_DIR / "unknown"
+    max_entries: int = 50             # oldest crops deleted beyond this
+    min_confidence: float = 0.30     # only save if recognition similarity at least this
+    cooldown_seconds: int = 10       # min seconds between crops of the same unknown face
 
 
 @dataclass
@@ -172,6 +210,9 @@ class SystemConfig:
     """Master configuration class combining all configs."""
     
     detection: DetectionConfig = field(default_factory=DetectionConfig)
+    temporal: TemporalVotingConfig = field(default_factory=TemporalVotingConfig)
+    batch: BatchConfig = field(default_factory=BatchConfig)
+    unknown_queue: UnknownQueueConfig = field(default_factory=UnknownQueueConfig)
     recognition: RecognitionConfig = field(default_factory=RecognitionConfig)
     engagement: EngagementConfig = field(default_factory=EngagementConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
@@ -190,6 +231,8 @@ class SystemConfig:
             self.recognition.dataset_path,
             self.database.backup_path,
             self.logging.log_dir,
+            self.batch.export_dir,
+            self.unknown_queue.dir,
             BASE_DIR / "static",
             BASE_DIR / "templates",
         ]

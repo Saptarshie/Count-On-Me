@@ -25,6 +25,31 @@ An intelligent, production-ready system that uses Deep Learning and Computer Vis
 - **Blink Detection**: Monitor alertness through blink frequency
 - **Engagement Scoring**: 0-100 score with categorization (Attentive/Distracted/Sleeping)
 
+### 🖼️ Multi-Image Batch Attendance & Face Deduplication
+- **Folder Input**: Process a folder of classroom photos in one shot
+- **Cross-Image Deduplication**: Cosine-similarity embedding matching merges the same student across photos — 12 photos with 87 faces correctly resolves to unique students
+- **Deduplication Report**: Images processed / faces detected / unique students / duplicates removed / unknown faces / avg similarity
+- **CSV Report**: `exports/attendance_<date>.csv` with `Student, Present, Occurrences, Confidence`
+- **No Retraining**: Uses the existing pretrained embedding pipeline
+- **High-Resolution Safe**: Images processed one at a time, never loading the whole set into memory
+
+### 🗳️ Temporal Recognition Voting
+- **Majority-Vote Acceptance**: An identity is only accepted after it wins a majority of votes over a sliding 5-observation window, filtering out one-frame recognition errors (blur, occlusion, extreme pose)
+- **Per-Track History**: Vote aggregation keyed by simple spatial face tracking
+
+### ⚡ Adaptive Frame Skipping
+- **FPS-Aware Stride**: 
+  - FPS > 20 → process every 3rd frame
+  - FPS 10–20 → process every 2nd frame
+  - FPS < 10 → process every frame
+- **Accuracy vs Latency Tradeoff**: Skips frames only when the pipeline has spare capacity
+
+### ❓ Unknown Face Queue
+- **Auto-Capture**: Unrecognized faces are cropped and saved to `unknown/` with a per-track cooldown to prevent duplicates
+- **Teacher Review Dashboard**: Review unknown faces and register or ignore them from the dashboard
+- **One-Click Registration**: Registering an unknown face adds its encoding to the live recognizer instantly
+
+
 ### 🔐 Security Features
 - **Liveness Detection**: Blink-based verification prevents photo spoofing
 - **Secure Database**: SQLite with parameterized queries
@@ -36,6 +61,33 @@ An intelligent, production-ready system that uses Deep Learning and Computer Vis
 - **Engagement Analytics**: Per-student and class-wide engagement metrics
 - **CSV Export**: Download attendance records for external use
 
+```
+                    IMAGE / VIDEO
+                         │
+                         ▼
+                 Face Detection (MediaPipe)
+                         │
+               ┌─────────┴──────────┐
+               │                    │
+             VIDEO                IMAGES
+               │                    │
+     Temporal Voting         Face Embeddings
+     Adaptive Skipping             │
+               │              Deduplication
+               │              (cosine similarity)
+               │                    │
+               └──────────┬─────────┘
+                          ▼
+                   Identity Matching
+                          ▼
+                      Attendance
+                          │
+            ┌─────────────┼─────────────┐
+            ▼             ▼             ▼
+        Engagement    Unknown Face    Analytics
+        Detection      Queue           & Reports
+```
+
 ## 🏗️ Project Structure
 
 ```
@@ -46,13 +98,14 @@ Real-Time-Face-Attendance-System/
 │   ├── detection/
 │   │   └── __init__.py      # Face detection module (MediaPipe)
 │   ├── recognition/
-│   │   └── __init__.py      # Face recognition module (DeepFace)
+│   │   └── __init__.py      # Face recognition module (DeepFace) + temporal voting
 │   ├── engagement/
 │   │   └── __init__.py      # Engagement tracking module (FaceMesh)
 │   ├── database/
 │   │   └── __init__.py      # SQLite database operations
-│   └── utils/
-│       └── __init__.py      # Helper functions, camera, logging
+│   ├── utils/
+│   │   └── __init__.py      # Helper functions, camera, logging
+│   └── batch.py             # Multi-image attendance + deduplication pipeline
 │
 ├── dataset/                  # Student face images
 │   └── student_name/
@@ -78,6 +131,7 @@ Real-Time-Face-Attendance-System/
 │   └── register.html
 │
 ├── main.py                  # Application entry point
+├── batch_attendance.py      # Multi-image batch attendance CLI
 ├── collect_dataset.py       # Automatic dataset capture tool
 ├── config.py                # Configuration settings
 ├── requirements.txt         # Python dependencies
@@ -192,6 +246,9 @@ python main.py --cli
 
 # Use different camera
 python main.py --camera 1
+
+# Multi-image batch attendance from a photo folder
+python batch_attendance.py classroom_photos/
 
 # Show help
 python main.py --help
