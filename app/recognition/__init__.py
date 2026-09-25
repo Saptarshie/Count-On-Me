@@ -619,6 +619,11 @@ class FaceRecognizer:
         """Record that attendance was marked for duplicate prevention."""
         self._attendance_log[name] = datetime.now()
     
+    def clear_attendance_log(self):
+        """Reset the attendance cooldown log (e.g. when changing sessions)."""
+        self._attendance_log.clear()
+        logger.info("Cleared recognition attendance cooldown log for session switch")
+    
     def get_student_info(self, name: str) -> Optional[StudentEncoding]:
         """Get student information by name."""
         return self.name_to_student.get(name)

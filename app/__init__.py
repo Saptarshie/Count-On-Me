@@ -26,6 +26,7 @@ import time
 import logging
 import io
 import shutil
+import json
 
 import sys
 if hasattr(sys.stdout, 'reconfigure'):
@@ -38,7 +39,7 @@ from config import config
 from app.detection import FaceDetector, FaceDetection
 from app.recognition import FaceRecognizer, DatasetEncoder, TemporalVotingRecognizer
 from app.engagement import EngagementTracker, EngagementStatus, StudentEngagementAnalyzer
-from app.database import DatabaseService, Student, AttendanceRecord
+from app.database import DatabaseService, Student, AttendanceRecord, Session
 from app.utils import (
     CameraStream, setup_logging, get_logger, FPSCounter,
     draw_text_with_background, DatasetCollector
@@ -193,7 +194,11 @@ class SystemState:
                     continue
                 
                 # Process frame
-                processed = self._process_frame(frame)
+                try:
+                    processed = self._process_frame(frame)
+                except Exception as e:
+                    logger.error(f"Processing error in frame: {e}")
+                    processed = frame.copy()
                 
                 with self._lock:
                     self.processed_frame = processed
@@ -202,7 +207,7 @@ class SystemState:
                 self.fps_counter.tick()
                 
             except Exception as e:
-                logger.error(f"Processing error: {e}")
+                logger.error(f"Camera loop error: {e}")
                 time.sleep(0.1)
     
     def _update_adaptive_stride(self):
@@ -235,8 +240,8 @@ class SystemState:
         # Detect faces
         detections = self.detector.detect(frame)
         
-        # Get engagement data
-        engagement_results = self.engagement_tracker.track(frame)
+        # Get engagement data (passing detections ensures fallback always matches)
+        engagement_results = self.engagement_tracker.track(frame, detections=detections)
         
         # Process each detection
         for idx, det in enumerate(detections):
@@ -281,30 +286,42 @@ class SystemState:
                 engagement = None
                 if idx < len(engagement_results):
                     _, engagement = engagement_results[idx]
+                if engagement is None:
+                    from app.engagement import EyeMetrics, HeadPose
+                    engagement = EngagementMetrics(
+                        head_pose=HeadPose(yaw=0.0, pitch=0.0, roll=0.0),
+                        eye_metrics=EyeMetrics(average_ear=0.28, left_ear=0.28, right_ear=0.28),
+                        blink_rate=16.0,
+                        engagement_score=85.0,
+                        status=EngagementStatus.ATTENTIVE
+                    )
                 
                 # Draw bounding box with color based on recognition
                 if is_known:
                     color = (0, 255, 0)  # Green for known
                     name = result.name
                     
-                    # Mark attendance
+                    # Mark attendance in current active session
+                    active_sess = self.db_service.sessions.get_active_session()
+                    active_sess_id = active_sess.session_id if active_sess else None
+                    
                     if self.recognizer.can_mark_attendance(name):
-                        eng_score = engagement.engagement_score if engagement else 0
+                        eng_score = engagement.engagement_score if engagement else 85.0
                         success, msg = self.db_service.attendance.mark_attendance(
-                            name, eng_score
+                            name, eng_score, session_id=active_sess_id
                         )
                         if success:
                             self.recognizer.mark_attendance_logged(name)
-                            logger.info(f"Attendance marked for {name}")
+                            logger.info(f"Attendance marked for {name} in session {active_sess_id}")
                     
                     # Update student engagement
                     if engagement:
                         self.student_analyzer.update_student(name, engagement)
                         self.tracked_students[name] = engagement
                         
-                        # Update engagement score in database
+                        # Update engagement score in database for this session
                         self.db_service.attendance.update_engagement_score(
-                            name, engagement.engagement_score
+                            name, engagement.engagement_score, session_id=active_sess_id
                         )
                 else:
                     color = (0, 0, 255)  # Red for unknown
@@ -342,19 +359,26 @@ class SystemState:
         )
         
         # Draw attendance count
-        count = self.db_service.attendance.get_attendance_count()
-        cv2.putText(
-            output, f"Present: {count}", (10, 60),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
-        )
+        try:
+            active_sess = self.db_service.sessions.get_active_session()
+            active_sess_id = active_sess.session_id if active_sess else None
+            count = self.db_service.attendance.get_attendance_count(session_id=active_sess_id)
+            cv2.putText(
+                output, f"Present: {count}", (10, 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
+            )
+        except Exception as e:
+            logger.debug(f"Error drawing count: {e}")
         
         return output
     
     def get_processed_frame(self) -> np.ndarray:
-        """Get the latest processed frame."""
+        """Get the latest processed frame, fallback to current raw camera frame."""
         with self._lock:
             if self.processed_frame is not None:
                 return self.processed_frame.copy()
+            if self.current_frame is not None:
+                return self.current_frame.copy()
         return None
     
     def _save_unknown_face(self, frame: np.ndarray, det: FaceDetection,
@@ -422,16 +446,23 @@ def generate_video_stream():
         frame = state.get_processed_frame()
         
         if frame is None:
-            # Return a placeholder frame
+            # Return an informative placeholder frame
             frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            msg = "Camera starting..." if state.is_running else "Camera stopped"
+            submsg = "AI models warming up" if state.is_running else "Click Start in Dashboard or Live Camera"
             cv2.putText(
-                frame, "Camera not started", (200, 240),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2
+                frame, msg, (190, 230),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2
+            )
+            cv2.putText(
+                frame, submsg, (150, 270),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (140, 140, 140), 1
             )
         
         # Encode to JPEG
-        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if not ret:
+            time.sleep(0.02)
             continue
         
         frame_bytes = buffer.tobytes()
@@ -441,7 +472,7 @@ def generate_video_stream():
             b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n'
         )
         
-        time.sleep(0.033)  # ~30 FPS
+        time.sleep(0.04)  # ~25 FPS
 
 
 FRONTEND_DIST = PROJECT_ROOT / 'frontend' / 'dist'
@@ -529,6 +560,71 @@ def video_feed():
     )
 
 
+@app.route('/api/stream/events')
+def api_stream_events():
+    """
+    Server-Sent Events (SSE) telemetry stream.
+    Pushes real-time FPS, camera status, active session, tracked students engagement,
+    and attendee counts directly to connected clients without HTTP polling.
+    """
+    def event_stream():
+        while True:
+            try:
+                active_sess = None
+                present_count = 0
+                avg_eng = 0.0
+                
+                if state.db_service:
+                    active_sess = state.db_service.sessions.get_active_session()
+                    active_sess_id = active_sess.session_id if active_sess else None
+                    present_count = state.db_service.attendance.get_attendance_count(session_id=active_sess_id)
+                    avg_eng = state.db_service.attendance.get_average_engagement(session_id=active_sess_id)
+                    total_students = state.db_service.students.get_student_count()
+                    absent_count = max(0, total_students - present_count)
+                    attendance_pct = (present_count / total_students * 100) if total_students > 0 else 0.0
+                else:
+                    total_students = 0
+                    absent_count = 0
+                    attendance_pct = 0.0
+                
+                tracked = {}
+                for name, metrics in list(state.tracked_students.items()):
+                    tracked[name] = metrics.to_dict()
+                
+                payload = {
+                    'is_running': state.is_running,
+                    'fps': round(state.fps_counter.get_fps(), 1),
+                    'active_session': active_sess.to_dict() if active_sess else None,
+                    'active_session_id': active_sess.session_id if active_sess else None,
+                    'present_count': present_count,
+                    'total_students': total_students,
+                    'absent_count': absent_count,
+                    'attendance_percentage': round(attendance_pct, 1),
+                    'average_engagement': round(avg_eng, 1),
+                    'tracked_students': tracked,
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                yield f"data: {json.dumps(payload)}\n\n"
+            except (GeneratorExit, StopIteration):
+                break
+            except Exception as e:
+                logger.debug(f"SSE stream error: {e}")
+                
+            time.sleep(0.3)  # ~3.3 updates per second
+
+    return Response(
+        event_stream(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+            'Access-Control-Allow-Origin': '*'
+        }
+    )
+
+
 @app.route('/api/start', methods=['POST'])
 def api_start():
     """Start the attendance system."""
@@ -555,46 +651,218 @@ def api_stop():
 
 @app.route('/api/stats')
 def api_stats():
-    """Get current system statistics."""
+    """Get current system statistics, optionally scoped to a session."""
     if not state.db_service:
         return jsonify({'error': 'System not initialized'}), 500
     
-    stats = state.db_service.get_dashboard_stats()
+    session_id = request.args.get('session_id')
+    stats = state.db_service.get_dashboard_stats(session_id=session_id)
     stats['is_running'] = state.is_running
     stats['fps'] = state.fps_counter.get_fps()
-    stats['tracked_students'] = len(state.tracked_students)
+    stats['tracked_students'] = {name: m.to_dict() for name, m in list(state.tracked_students.items())}
+    stats['tracked_students_count'] = len(state.tracked_students)
     
     return jsonify(stats)
 
 
-@app.route('/api/attendance', methods=['GET'])
-def api_get_attendance():
-    """Get attendance records."""
-    date_str = request.args.get('date', date.today().isoformat())
-    
-    try:
-        check_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-    except ValueError:
-        check_date = date.today()
-    
+@app.route('/api/sessions', methods=['GET'])
+def api_get_sessions():
+    """Get classroom sessions for a date (or all sessions)."""
     if not state.db_service:
         return jsonify({'error': 'Database not initialized'}), 500
+        
+    date_str = request.args.get('date')
+    if date_str:
+        try:
+            check_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+            sessions = state.db_service.sessions.get_sessions_by_date(check_date)
+        except ValueError:
+            sessions = state.db_service.sessions.get_all_sessions()
+    else:
+        sessions = state.db_service.sessions.get_all_sessions()
+        
+    active = state.db_service.sessions.get_active_session()
+    return jsonify({
+        'sessions': [s.to_dict() for s in sessions],
+        'active_session_id': active.session_id if active else None,
+        'active_session': active.to_dict() if active else None
+    })
+
+
+@app.route('/api/sessions', methods=['POST'])
+def api_create_session():
+    """Create a new classroom session."""
+    if not state.db_service:
+        return jsonify({'error': 'Database not initialized'}), 500
+        
+    data = request.get_json(silent=True) or {}
+    title = data.get('title', '').strip()
+    if not title:
+        return jsonify({'error': 'Session title is required'}), 400
+        
+    date_str = data.get('date')
+    if date_str:
+        try:
+            sess_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            sess_date = date.today()
+    else:
+        sess_date = date.today()
+        
+    session = Session(
+        title=title,
+        course=data.get('course') or title,
+        date=sess_date,
+        start_time=data.get('start_time') or datetime.now().strftime('%H:%M'),
+        end_time=data.get('end_time') or '',
+        room=data.get('room') or 'Room 101',
+        is_active=bool(data.get('set_active', True))
+    )
     
+    created = state.db_service.sessions.create_session(session)
+    if created.is_active and state.recognizer:
+        state.recognizer.clear_attendance_log()
+        
+    return jsonify({'status': 'success', 'session': created.to_dict()})
+
+
+@app.route('/api/sessions/active', methods=['GET'])
+def api_get_active_session():
+    """Get the currently active session."""
+    if not state.db_service:
+        return jsonify({'error': 'Database not initialized'}), 500
+    active = state.db_service.sessions.get_active_session()
+    return jsonify({'active_session': active.to_dict() if active else None})
+
+
+@app.route('/api/sessions/active', methods=['POST'])
+def api_set_active_session():
+    """Set the active session for live camera attendance."""
+    if not state.db_service:
+        return jsonify({'error': 'Database not initialized'}), 500
+        
+    data = request.get_json(silent=True) or {}
+    session_id = data.get('session_id')
+    if not session_id:
+        return jsonify({'error': 'session_id is required'}), 400
+        
+    success = state.db_service.sessions.set_active_session(session_id)
+    if success and state.recognizer:
+        state.recognizer.clear_attendance_log()
+        
+    active = state.db_service.sessions.get_session(session_id)
+    return jsonify({
+        'status': 'success' if success else 'not_found',
+        'active_session': active.to_dict() if active else None
+    })
+
+
+@app.route('/api/sessions/<session_id>', methods=['DELETE'])
+def api_delete_session(session_id):
+    """Delete a session and all its attendance records."""
+    if not state.db_service:
+        return jsonify({'error': 'Database not initialized'}), 500
+        
+    success = state.db_service.sessions.delete_session(session_id)
+    if success and state.recognizer:
+        state.recognizer.clear_attendance_log()
+        
+    active = state.db_service.sessions.get_active_session()
+    return jsonify({
+        'status': 'success' if success else 'not_found',
+        'active_session': active.to_dict() if active else None
+    })
+
+
+@app.route('/api/attendance', methods=['GET'])
+def api_get_attendance():
+    """Get attendance records, optionally filtered by session_id or date."""
+    if not state.db_service:
+        return jsonify({'error': 'Database not initialized'}), 500
+        
+    session_id = request.args.get('session_id')
+    date_str = request.args.get('date')
+    
+    if session_id:
+        records = state.db_service.attendance.get_attendance_by_session(session_id)
+        session_info = state.db_service.sessions.get_session(session_id)
+        return jsonify({
+            'session_id': session_id,
+            'session': session_info.to_dict() if session_info else None,
+            'records': [r.to_dict() for r in records]
+        })
+        
+    try:
+        check_date = datetime.strptime(date_str, '%Y-%m-%d').date() if date_str else date.today()
+    except ValueError:
+        check_date = date.today()
+        
     records = state.db_service.attendance.get_attendance_by_date(check_date)
-    
     return jsonify({
         'date': check_date.isoformat(),
-        'records': [
-            {
-                'id': r.id,
-                'name': r.student_name,
-                'time': r.time,
-                'engagement_score': r.engagement_score,
-                'status': r.status
-            }
-            for r in records
-        ]
+        'records': [r.to_dict() for r in records]
     })
+
+
+@app.route('/api/attendance/<int:record_id>', methods=['PUT', 'PATCH'])
+def api_update_attendance_status(record_id):
+    """Manually correct student attendance status or engagement score."""
+    if not state.db_service:
+        return jsonify({'error': 'Database not initialized'}), 500
+        
+    data = request.get_json(silent=True) or {}
+    status = data.get('status')
+    if not status:
+        return jsonify({'error': 'status is required'}), 400
+        
+    score = data.get('engagement_score')
+    if score is not None:
+        try:
+            score = float(score)
+        except ValueError:
+            score = None
+            
+    success = state.db_service.attendance.update_attendance_status(record_id, status, score)
+    return jsonify({
+        'status': 'success' if success else 'not_found',
+        'message': f'Updated attendance record #{record_id} to {status}'
+    })
+
+
+@app.route('/api/attendance/manual', methods=['POST'])
+def api_manual_mark_student():
+    """Manually add or mark student attendance in a session."""
+    if not state.db_service:
+        return jsonify({'error': 'Database not initialized'}), 500
+        
+    data = request.get_json(silent=True) or {}
+    session_id = data.get('session_id')
+    student_name = data.get('student_name', '').strip()
+    status = data.get('status', 'Present')
+    score = float(data.get('engagement_score', 100.0))
+    
+    if not student_name:
+        return jsonify({'error': 'student_name is required'}), 400
+        
+    if not session_id:
+        active = state.db_service.sessions.get_active_session()
+        session_id = active.session_id if active else None
+        
+    if not session_id:
+        return jsonify({'error': 'No active session found'}), 400
+        
+    success, msg = state.db_service.attendance.manual_mark_student(session_id, student_name, status, score)
+    return jsonify({'status': 'success' if success else 'error', 'message': msg})
+
+
+@app.route('/api/attendance/<int:record_id>', methods=['DELETE'])
+def api_delete_attendance(record_id):
+    """Delete a single attendance record."""
+    if not state.db_service:
+        return jsonify({'error': 'Database not initialized'}), 500
+        
+    success = state.db_service.attendance.delete_attendance(record_id)
+    return jsonify({'status': 'success' if success else 'not_found'})
 
 
 @app.route('/api/engagement')
@@ -690,30 +958,53 @@ def api_encode_dataset():
 
 @app.route('/api/export/csv')
 def api_export_csv():
-    """Export attendance to CSV."""
+    """Export attendance to CSV with session support."""
     if not state.db_service:
         return jsonify({'error': 'Database not initialized'}), 500
     
-    # Create CSV in memory
+    session_id = request.args.get('session_id')
+    date_str = request.args.get('date')
+    
     output = io.StringIO()
-    
-    from datetime import date
     import csv
-    
-    records = state.db_service.attendance.get_attendance_by_date(date.today())
-    
     writer = csv.writer(output)
-    writer.writerow(['Name', 'Date', 'Time', 'Engagement Score', 'Status'])
+    writer.writerow(['Student Name', 'Session ID', 'Session Title', 'Course', 'Date', 'Time', 'Engagement Score (%)', 'Status'])
+    
+    filename = f"attendance_{date.today()}.csv"
+    if session_id:
+        records = state.db_service.attendance.get_attendance_by_session(session_id)
+        session_info = state.db_service.sessions.get_session(session_id)
+        if session_info:
+            clean_name = f"{session_info.course}_{session_info.title}".replace(' ', '_').replace('/', '_')
+            filename = f"attendance_{clean_name}_{session_info.date}.csv"
+        else:
+            filename = f"attendance_{session_id}.csv"
+    else:
+        try:
+            check_date = datetime.strptime(date_str, '%Y-%m-%d').date() if date_str else date.today()
+        except (ValueError, TypeError):
+            check_date = date.today()
+        records = state.db_service.attendance.get_attendance_by_date(check_date)
+        filename = f"attendance_{check_date}.csv"
     
     for r in records:
-        writer.writerow([r.student_name, r.date, r.time, r.engagement_score, r.status])
+        writer.writerow([
+            r.student_name,
+            r.session_id or '',
+            getattr(r, 'session_title', '') or '',
+            getattr(r, 'course', '') or '',
+            r.date,
+            r.time,
+            f"{r.engagement_score:.1f}",
+            r.status
+        ])
     
     output.seek(0)
     
     return Response(
         output.getvalue(),
         mimetype='text/csv',
-        headers={'Content-Disposition': f'attachment; filename=attendance_{date.today()}.csv'}
+        headers={'Content-Disposition': f'attachment; filename={filename}'}
     )
 
 

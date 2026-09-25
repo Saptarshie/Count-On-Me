@@ -28,9 +28,18 @@ export const getVideoFeedUrl = () => {
   return `${base}/video_feed`;
 };
 
-export const getExportCsvUrl = () => {
+export const getEventsStreamUrl = () => {
   const base = getBaseUrl();
-  return `${base}/api/export/csv`;
+  return `${base}/api/stream/events`;
+};
+
+export const getExportCsvUrl = (sessionId, dateStr) => {
+  const base = getBaseUrl();
+  const params = new URLSearchParams();
+  if (sessionId) params.append('session_id', sessionId);
+  if (dateStr) params.append('date', dateStr);
+  const q = params.toString();
+  return `${base}/api/export/csv${q ? `?${q}` : ''}`;
 };
 
 export const getUnknownImageUrl = (filename) => {
@@ -79,16 +88,57 @@ async function request(endpoint, options = {}) {
 
 export const api = {
   // Stats & System Control
-  getStats: () => request('/api/stats'),
+  getStats: (sessionId) => {
+    const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return request(`/api/stats${query}`);
+  },
   startSystem: () => request('/api/start', { method: 'POST' }),
   stopSystem: () => request('/api/stop', { method: 'POST' }),
   encodeDataset: () => request('/api/encode', { method: 'POST' }),
 
-  // Attendance
-  getAttendance: (dateStr) => {
+  // Sessions Management
+  getSessions: (dateStr) => {
     const query = dateStr ? `?date=${encodeURIComponent(dateStr)}` : '';
+    return request(`/api/sessions${query}`);
+  },
+  createSession: (sessionData) => request('/api/sessions', {
+    method: 'POST',
+    body: JSON.stringify(sessionData)
+  }),
+  getActiveSession: () => request('/api/sessions/active'),
+  setActiveSession: (sessionId) => request('/api/sessions/active', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sessionId })
+  }),
+  deleteSession: (sessionId) => request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE'
+  }),
+
+  // Attendance
+  getAttendance: (filter) => {
+    let query = '';
+    if (typeof filter === 'string') {
+      query = filter ? `?date=${encodeURIComponent(filter)}` : '';
+    } else if (filter && typeof filter === 'object') {
+      const p = new URLSearchParams();
+      if (filter.session_id) p.append('session_id', filter.session_id);
+      if (filter.date) p.append('date', filter.date);
+      const s = p.toString();
+      query = s ? `?${s}` : '';
+    }
     return request(`/api/attendance${query}`);
   },
+  updateAttendanceStatus: (recordId, status, engagementScore) => request(`/api/attendance/${recordId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status, engagement_score: engagementScore })
+  }),
+  manualMarkAttendance: (payload) => request('/api/attendance/manual', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  }),
+  deleteAttendanceRecord: (recordId) => request(`/api/attendance/${recordId}`, {
+    method: 'DELETE'
+  }),
 
   // Real-time Engagement
   getEngagement: () => request('/api/engagement'),
@@ -118,3 +168,4 @@ export const api = {
     body: JSON.stringify({ folder })
   }),
 };
+

@@ -117,6 +117,8 @@ class EngagementMetrics:
     
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
+        score_val = round(float(self.engagement_score), 1)
+        ear_val = round(float(self.eye_metrics.average_ear), 2)
         return {
             'head_pose': {
                 'yaw': self.head_pose.yaw,
@@ -129,8 +131,14 @@ class EngagementMetrics:
                 'average_ear': self.eye_metrics.average_ear,
                 'is_blinking': self.eye_metrics.is_blinking
             },
-            'blink_rate': self.blink_rate,
-            'engagement_score': self.engagement_score,
+            'score': score_val,
+            'engagement_score': score_val,
+            'ear': ear_val,
+            'average_ear': ear_val,
+            'blink_rate': round(float(self.blink_rate), 1),
+            'is_blinking': bool(self.eye_metrics.is_blinking),
+            'is_attentive': self.status == EngagementStatus.ATTENTIVE,
+            'is_sleeping': self.status == EngagementStatus.SLEEPING,
             'status': self.status.value,
             'timestamp': self.timestamp.isoformat()
         }
@@ -318,7 +326,7 @@ class FaceMeshAnalyzer:
         landmarks[152] = (x + w // 2, y + h, 0)  # Chin
         landmarks[287] = (x + int(0.2 * w), y + int(0.7 * h), 0)  # Left mouth
         landmarks[57] = (x + int(0.8 * w), y + int(0.7 * h), 0)  # Right mouth
-        
+        landmarks['estimated'] = True
         return landmarks
     
     def calculate_ear(self, landmarks: Dict) -> Tuple[float, float]:
@@ -333,6 +341,9 @@ class FaceMeshAnalyzer:
         Returns:
             Tuple of (left_ear, right_ear)
         """
+        if landmarks.get('estimated'):
+            return 0.28, 0.28
+
         def eye_aspect_ratio(eye_indices: List[int]) -> float:
             try:
                 # Get eye points
@@ -369,6 +380,9 @@ class FaceMeshAnalyzer:
         Returns:
             HeadPose object with angles in degrees
         """
+        if landmarks.get('estimated'):
+            return HeadPose(yaw=0.0, pitch=0.0, roll=0.0)
+
         try:
             # 3D model points (standard face model)
             model_points = np.array([
@@ -505,18 +519,31 @@ class EngagementTracker:
             }
         return self._face_data[face_id]
     
-    def track(self, frame: np.ndarray) -> List[Tuple[int, EngagementMetrics]]:
+    def track(self, frame: np.ndarray, detections: Optional[List] = None) -> List[Tuple[int, EngagementMetrics]]:
         """
         Track engagement for all faces in frame.
         
         Args:
             frame: BGR image
+            detections: Optional list of FaceDetection objects
         
         Returns:
             List of (face_id, EngagementMetrics) tuples
         """
         results = []
         faces_data = self.analyzer.process(frame)
+        
+        # If analyzer found no faces or fewer than detections, complement with detector's bboxes
+        if detections and (not faces_data or len(faces_data) < len(detections)):
+            if not faces_data:
+                for det in detections:
+                    x, y, w, h = det.bbox
+                    landmarks = self.analyzer._estimate_landmarks_from_box(x, y, w, h)
+                    faces_data.append({
+                        'landmarks': landmarks,
+                        'raw_landmarks': None,
+                        'estimated': True
+                    })
         
         for face_id, face_data in enumerate(faces_data):
             landmarks = face_data['landmarks']

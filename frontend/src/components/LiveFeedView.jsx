@@ -11,11 +11,13 @@ import {
   CheckCircle2, 
   AlertTriangle,
   Sliders,
-  Sparkles
+  Sparkles,
+  BookOpen,
+  ChevronRight
 } from 'lucide-react';
 import { api, getVideoFeedUrl } from '../api';
 
-export default function LiveFeedView({ stats, onRefresh }) {
+export default function LiveFeedView({ stats, setActiveTab, onRefresh }) {
   const [streamError, setStreamError] = useState(false);
   const [streamKey, setStreamKey] = useState(Date.now());
   const [loading, setLoading] = useState(false);
@@ -29,39 +31,74 @@ export default function LiveFeedView({ stats, onRefresh }) {
 
   const videoContainerRef = useRef(null);
 
-  // Poll engagement state
+  // Automatically refresh stream key whenever stream becomes active or toggled
   useEffect(() => {
-    let prevStudents = {};
-    const interval = setInterval(async () => {
-      try {
-        const engData = await api.getEngagement();
-        if (engData) {
-          setTrackedStudents(engData);
+    if (stats?.is_running) {
+      setStreamError(false);
+      setStreamKey(Date.now());
+    }
+  }, [stats?.is_running]);
 
-          // Add detected activities to ticker
-          Object.entries(engData).forEach(([name, data]) => {
-            if (!prevStudents[name]) {
-              const timeStr = new Date().toLocaleTimeString();
-              setActivityLog(prev => [
-                {
-                  id: Date.now() + Math.random(),
-                  time: timeStr,
-                  type: 'detect',
-                  text: `${name} detected in frame (Score: ${(data.score ?? 0).toFixed(0)}%)`
-                },
-                ...prev.slice(0, 15)
-              ]);
-            }
-          });
-          prevStudents = { ...engData };
+  // Real-time tracking from SSE stream passed via stats props
+  useEffect(() => {
+    if (stats?.tracked_students && typeof stats.tracked_students === 'object') {
+      setTrackedStudents(stats.tracked_students);
+
+      Object.entries(stats.tracked_students).forEach(([name, data]) => {
+        setActivityLog((prev) => {
+          const lastLogged = prev.find(p => p.studentName === name);
+          const now = Date.now();
+          if (!lastLogged || (now - lastLogged.timeMs > 10000)) {
+            const timeStr = new Date().toLocaleTimeString();
+            const curScore = Math.round(data.score ?? data.engagement_score ?? 85);
+            return [
+              {
+                id: now + Math.random(),
+                studentName: name,
+                timeMs: now,
+                time: timeStr,
+                type: 'detect',
+                text: `${name} in view (Engagement: ${curScore}%)`
+              },
+              ...prev.slice(0, 19)
+            ];
+          }
+          return prev;
+        });
+      });
+    }
+  }, [stats?.tracked_students]);
+
+  // Fallback slow poll if SSE is not active
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      if (!stats?.tracked_students || Object.keys(stats.tracked_students).length === 0) {
+        try {
+          const engData = await api.getEngagement();
+          if (engData && Object.keys(engData).length > 0) {
+            setTrackedStudents(engData);
+          }
+        } catch (e) {
+          // silent fallback
         }
-      } catch (e) {
-        // stream may be idle
       }
-    }, 1500);
+    }, 5000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [stats?.tracked_students]);
+
+  const handleImageError = () => {
+    // If the system is running, the devtunnel/network dropped a packet
+    // Auto-retry reconnecting the stream after a brief pause
+    if (stats?.is_running) {
+      setTimeout(() => {
+        setStreamKey(Date.now());
+        setStreamError(false);
+      }, 1200);
+    } else {
+      setStreamError(true);
+    }
+  };
 
   const handleStart = async () => {
     setLoading(true);
@@ -186,6 +223,59 @@ export default function LiveFeedView({ stats, onRefresh }) {
         </div>
       </div>
 
+      {/* Active Classroom Session Notification Bar */}
+      <div className="glass-panel" style={{
+        padding: '12px 18px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        flexWrap: 'wrap',
+        gap: '10px',
+        background: 'rgba(99, 102, 241, 0.08)',
+        border: '1px solid rgba(99, 102, 241, 0.25)'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div style={{
+            width: '32px',
+            height: '32px',
+            borderRadius: '8px',
+            background: 'rgba(99, 102, 241, 0.2)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: '#818cf8'
+          }}>
+            <BookOpen size={16} />
+          </div>
+          <div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', textTransform: 'uppercase', fontWeight: 700, letterSpacing: '0.05em' }}>
+              Target Session for Live Attendance:
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '2px' }}>
+              <span style={{ fontWeight: 800, color: '#f8fafc', fontSize: '0.95rem' }}>
+                {stats?.active_session ? `${stats.active_session.course} - ${stats.active_session.title}` : 'Default Session'}
+              </span>
+              {stats?.active_session?.room && (
+                <span className="badge" style={{ background: 'rgba(255,255,255,0.08)', color: 'var(--text-muted)', fontSize: '0.7rem' }}>
+                  {stats.active_session.room}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {setActiveTab && (
+          <button
+            onClick={() => setActiveTab('attendance')}
+            className="btn btn-secondary"
+            style={{ fontSize: '0.8rem', padding: '6px 12px' }}
+          >
+            <span>Change Session / View Roster</span>
+            <ChevronRight size={14} />
+          </button>
+        )}
+      </div>
+
       {/* Main Grid: Stream on Left, Live Tracking on Right */}
       <div style={{
         display: 'grid',
@@ -212,9 +302,10 @@ export default function LiveFeedView({ stats, onRefresh }) {
         >
           {stats?.is_running && !streamError ? (
             <img
+              key={streamKey}
               src={feedUrl}
               alt="Live Camera Feed"
-              onError={() => setStreamError(true)}
+              onError={handleImageError}
               style={{
                 width: '100%',
                 height: 'auto',
@@ -300,11 +391,14 @@ export default function LiveFeedView({ stats, onRefresh }) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '280px', overflowY: 'auto' }}>
               {Object.keys(trackedStudents).length > 0 ? (
                 Object.entries(trackedStudents).map(([name, data]) => {
-                  const isAttentive = data.is_attentive;
-                  const isSleeping = data.is_sleeping;
+                  const score = Math.round(data.score ?? data.engagement_score ?? 0);
+                  const isSleeping = Boolean(data.is_sleeping || data.status === 'Sleeping' || data.status === 'Drowsy');
+                  const isAttentive = Boolean(data.is_attentive || data.status === 'Attentive' || score >= 60);
                   const badgeClass = isSleeping ? 'badge-danger' : isAttentive ? 'badge-success' : 'badge-warning';
                   const label = isSleeping ? 'Drowsy' : isAttentive ? 'Attentive' : 'Distracted';
-                  const score = Math.round(data.score ?? 0);
+                  const earVal = Number(data.ear ?? data.average_ear ?? data.eye_metrics?.average_ear ?? 0.28).toFixed(2);
+                  const eyesClosed = Boolean(data.is_blinking ?? data.eye_metrics?.is_blinking);
+                  const blinks = Math.round(data.blink_rate ?? 0);
 
                   return (
                     <div key={name} style={{
@@ -321,10 +415,10 @@ export default function LiveFeedView({ stats, onRefresh }) {
                         <span className={`badge ${badgeClass}`}>{label} ({score}%)</span>
                       </div>
                       <div style={{ display: 'flex', gap: '12px', fontSize: '0.75rem', color: 'var(--text-dim)' }}>
-                        <span>Blink: <strong style={{ color: 'var(--text-main)' }}>{data.blink_rate ?? 0}/m</strong></span>
-                        <span>EAR: <strong style={{ color: 'var(--text-main)' }}>{(data.ear ?? 0).toFixed(2)}</strong></span>
-                        <span>Eyes: <strong style={{ color: data.is_blinking ? '#fbbf24' : '#34d399' }}>
-                          {data.is_blinking ? 'Closed' : 'Open'}
+                        <span>Blink: <strong style={{ color: 'var(--text-main)' }}>{blinks}/m</strong></span>
+                        <span>EAR: <strong style={{ color: 'var(--text-main)' }}>{earVal}</strong></span>
+                        <span>Eyes: <strong style={{ color: eyesClosed ? '#fbbf24' : '#34d399' }}>
+                          {eyesClosed ? 'Closed' : 'Open'}
                         </strong></span>
                       </div>
                     </div>
