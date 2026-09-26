@@ -16,7 +16,12 @@ import {
   ArrowRight,
   Sparkles,
   RefreshCw,
-  FolderOpen
+  FolderOpen,
+  UserPlus,
+  Trash2,
+  Users,
+  Image,
+  AlertCircle
 } from 'lucide-react';
 import { api, getExportCsvUrl, getUnknownImageUrl, getBatchExportCsvUrl } from '../api';
 
@@ -24,9 +29,23 @@ export default function DashboardView({ stats, setActiveTab, onRefresh }) {
   const [attendanceRecords, setAttendanceRecords] = useState([]);
   const [realtimeEngagement, setRealtimeEngagement] = useState({});
   const [unknownFaces, setUnknownFaces] = useState([]);
+  const [faceClusters, setFaceClusters] = useState([]);
+  const [viewMode, setViewMode] = useState('clusters'); // 'clusters' | 'all'
+  const [clusteringLoading, setClusteringLoading] = useState(false);
+  const [clearingLoading, setClearingLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [registeringFace, setRegisteringFace] = useState(null);
-  const [studentNameInput, setStudentNameInput] = useState('');
+
+  // Register Modal state with multi-face support & false-positive deletion
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalFaces, setModalFaces] = useState([]);
+  const [regForm, setRegForm] = useState({
+    name: '',
+    student_id: '',
+    department: 'Computer Science',
+    email: ''
+  });
+  const [regSubmitting, setRegSubmitting] = useState(false);
+  const [regFeedback, setRegFeedback] = useState({ type: '', message: '' });
   
   // Batch attendance state
   const [batchFolder, setBatchFolder] = useState('');
@@ -34,14 +53,14 @@ export default function DashboardView({ stats, setActiveTab, onRefresh }) {
   const [batchResult, setBatchResult] = useState(null);
   const [batchError, setBatchError] = useState(null);
 
-  // Poll live data every 3 seconds
+  // Poll live data every 3 seconds (load clusters on initial mount)
   useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 3000);
+    loadData(true);
+    const interval = setInterval(() => loadData(false), 3000);
     return () => clearInterval(interval);
   }, []);
 
-  const loadData = async () => {
+  const loadData = async (includeClusters = false) => {
     try {
       // 1. Get today's attendance
       const attData = await api.getAttendance();
@@ -52,32 +71,162 @@ export default function DashboardView({ stats, setActiveTab, onRefresh }) {
       if (engData) setRealtimeEngagement(engData);
 
       // 3. Get unknown faces queue
-      const unkData = await api.getUnknownFaces();
+      const unkData = await api.getUnknownFaces(includeClusters);
       if (unkData?.unknown_faces) setUnknownFaces(unkData.unknown_faces);
+      if (includeClusters && unkData?.clusters) {
+        setFaceClusters(unkData.clusters);
+      }
     } catch (e) {
       console.warn('Dashboard poll error:', e);
     }
   };
 
-  const handleRegisterUnknown = async (filename) => {
-    if (!studentNameInput.trim()) return;
+  const handleClusterify = async () => {
+    setClusteringLoading(true);
     try {
-      await api.registerUnknown(filename, studentNameInput.trim());
-      setRegisteringFace(null);
-      setStudentNameInput('');
-      loadData();
-      if (onRefresh) onRefresh();
+      const res = await api.clusterifyUnknownFaces();
+      if (res?.clusters) {
+        setFaceClusters(res.clusters);
+        setViewMode('clusters');
+      }
+      const unkData = await api.getUnknownFaces();
+      if (unkData?.unknown_faces) setUnknownFaces(unkData.unknown_faces);
     } catch (err) {
-      alert(`Registration failed: ${err.message}`);
+      alert(`Clusterify failed: ${err.message}`);
+    } finally {
+      setClusteringLoading(false);
     }
   };
 
-  const handleIgnoreUnknown = async (filename) => {
+  const handleClearQueue = async () => {
+    if (!window.confirm('Are you sure you want to clear all unknown faces from the review queue? This cannot be undone.')) {
+      return;
+    }
+    setClearingLoading(true);
+    try {
+      await api.clearUnknownFaces();
+      setUnknownFaces([]);
+      setFaceClusters([]);
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      alert(`Clear queue failed: ${err.message}`);
+    } finally {
+      setClearingLoading(false);
+    }
+  };
+
+  const handleOpenRegisterModal = (faces) => {
+    if (!faces || faces.length === 0) return;
+    setModalFaces([...faces]);
+    setRegForm({
+      name: '',
+      student_id: '',
+      department: 'Computer Science',
+      email: ''
+    });
+    setRegFeedback({ type: '', message: '' });
+    setModalOpen(true);
+  };
+
+  const handleRegisterFaceClick = (face) => {
+    // If clustered, find the person's cluster so all their faces are shown in the modal
+    if (faceClusters && faceClusters.length > 0) {
+      const parentCluster = faceClusters.find(c => 
+        c.faces?.some(f => f.filename === face.filename)
+      );
+      if (parentCluster && parentCluster.faces?.length > 0) {
+        handleOpenRegisterModal(parentCluster.faces);
+        return;
+      }
+    }
+    // Otherwise single image
+    handleOpenRegisterModal([face]);
+  };
+
+  const handleRemoveFaceFromBatch = (filename) => {
+    setModalFaces(prev => prev.filter(f => f.filename !== filename));
+  };
+
+  const handleSubmitRegister = async (e) => {
+    e.preventDefault();
+    if (!regForm.name.trim()) {
+      setRegFeedback({ type: 'error', message: 'Student name is required.' });
+      return;
+    }
+    if (modalFaces.length === 0) {
+      setRegFeedback({ type: 'error', message: 'At least one face crop is required.' });
+      return;
+    }
+
+    setRegSubmitting(true);
+    setRegFeedback({ type: '', message: '' });
+
+    try {
+      const payload = {
+        filenames: modalFaces.map(f => f.filename),
+        name: regForm.name.trim(),
+        student_id: regForm.student_id.trim() || `STU_${regForm.name.trim().toUpperCase().replace(/\s+/g, '_')}`,
+        department: regForm.department.trim(),
+        email: regForm.email.trim()
+      };
+
+      const res = await api.registerUnknownCluster(payload);
+      setRegFeedback({
+        type: 'success',
+        message: res.message || `Successfully registered ${payload.name} with ${modalFaces.length} photos!`
+      });
+
+      // Filter out registered files immediately
+      const registeredSet = new Set(payload.filenames);
+      setUnknownFaces(prev => prev.filter(f => !registeredSet.has(f.filename)));
+      setFaceClusters(prev => 
+        prev.map(c => ({
+          ...c,
+          faces: c.faces.filter(f => !registeredSet.has(f.filename)),
+          count: c.faces.filter(f => !registeredSet.has(f.filename)).length
+        })).filter(c => c.faces.length > 0)
+      );
+
+      setTimeout(() => {
+        setModalOpen(false);
+        setRegSubmitting(false);
+        loadData();
+        if (onRefresh) onRefresh();
+      }, 1000);
+
+    } catch (err) {
+      setRegFeedback({ type: 'error', message: err.message || 'Registration failed.' });
+      setRegSubmitting(false);
+    }
+  };
+
+  const handleIgnoreFace = async (filename) => {
     try {
       await api.ignoreUnknown(filename);
-      loadData();
+      setUnknownFaces(prev => prev.filter(f => f.filename !== filename));
+      setFaceClusters(prev => 
+        prev.map(c => ({
+          ...c,
+          faces: c.faces.filter(f => f.filename !== filename),
+          count: c.faces.filter(f => f.filename !== filename).length
+        })).filter(c => c.faces.length > 0)
+      );
+      if (onRefresh) onRefresh();
     } catch (err) {
       alert(`Ignore failed: ${err.message}`);
+    }
+  };
+
+  const handleIgnoreCluster = async (cluster) => {
+    try {
+      const filenames = cluster.faces.map(f => f.filename);
+      await api.ignoreUnknown(filenames);
+      const set = new Set(filenames);
+      setUnknownFaces(prev => prev.filter(f => !set.has(f.filename)));
+      setFaceClusters(prev => prev.filter(c => c.cluster_id !== cluster.cluster_id));
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      alert(`Dismiss cluster failed: ${err.message}`);
     }
   };
 
@@ -476,107 +625,355 @@ export default function DashboardView({ stats, setActiveTab, onRefresh }) {
 
       {/* Unknown Faces Review Queue */}
       <div className="glass-panel" style={{ padding: '20px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
           <div>
-            <h3 style={{ fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <h3 style={{ fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
               <HelpCircle size={18} color="#f59e0b" />
               Unknown Faces Review Queue
             </h3>
-            <p style={{ fontSize: '0.78rem', color: 'var(--text-dim)', marginTop: '2px' }}>
-              Unrecognized faces captured during live sessions. Register them as enrolled students with one click.
+            <p style={{ fontSize: '0.78rem', color: 'var(--text-dim)', marginTop: '2px', marginBottom: 0 }}>
+              Unrecognized faces captured during live sessions. Deduplicate into clusters or enroll them as students.
             </p>
           </div>
-          <span className="badge badge-warning">
-            {unknownFaces.length} Pending
-          </span>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            {/* View Mode Toggle (Clusters vs All Faces) */}
+            {faceClusters.length > 0 && (
+              <div style={{
+                display: 'flex',
+                background: 'rgba(15, 23, 42, 0.8)',
+                padding: '3px',
+                borderRadius: '8px',
+                border: '1px solid var(--border-subtle)'
+              }}>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('clusters')}
+                  style={{
+                    padding: '4px 10px',
+                    fontSize: '0.75rem',
+                    borderRadius: '6px',
+                    border: 'none',
+                    background: viewMode === 'clusters' ? 'var(--primary-color)' : 'transparent',
+                    color: viewMode === 'clusters' ? '#ffffff' : 'var(--text-dim)',
+                    cursor: 'pointer',
+                    fontWeight: 600,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                  }}
+                >
+                  <Users size={12} />
+                  <span>Clusters ({faceClusters.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('all')}
+                  style={{
+                    padding: '4px 10px',
+                    fontSize: '0.75rem',
+                    borderRadius: '6px',
+                    border: 'none',
+                    background: viewMode === 'all' ? 'var(--primary-color)' : 'transparent',
+                    color: viewMode === 'all' ? '#ffffff' : 'var(--text-dim)',
+                    cursor: 'pointer',
+                    fontWeight: 600,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                  }}
+                >
+                  <Image size={12} />
+                  <span>All ({unknownFaces.length})</span>
+                </button>
+              </div>
+            )}
+
+            {/* Clusterify Button */}
+            <button
+              className="btn btn-primary"
+              style={{
+                fontSize: '0.78rem',
+                padding: '6px 12px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
+                border: 'none',
+                boxShadow: '0 4px 12px rgba(99, 102, 241, 0.3)'
+              }}
+              onClick={handleClusterify}
+              disabled={clusteringLoading || unknownFaces.length === 0}
+              title="Automatically cluster repeat appearances of the same person using facial embeddings"
+            >
+              {clusteringLoading ? (
+                <>
+                  <RefreshCw size={13} className="animate-spin" />
+                  <span>Clustering...</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles size={13} />
+                  <span>Clusterify</span>
+                </>
+              )}
+            </button>
+
+            {/* Clear Queue Button */}
+            <button
+              className="btn btn-secondary"
+              style={{
+                fontSize: '0.78rem',
+                padding: '6px 12px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                borderColor: 'rgba(239, 68, 68, 0.4)',
+                color: '#fca5a5'
+              }}
+              onClick={handleClearQueue}
+              disabled={clearingLoading || unknownFaces.length === 0}
+              title="Clear all unknown face captures from the queue"
+            >
+              {clearingLoading ? (
+                <>
+                  <RefreshCw size={13} className="animate-spin" />
+                  <span>Clearing...</span>
+                </>
+              ) : (
+                <>
+                  <Trash2 size={13} />
+                  <span>Clear Queue</span>
+                </>
+              )}
+            </button>
+
+            <span className="badge badge-warning" style={{ fontSize: '0.75rem' }}>
+              {unknownFaces.length} Pending
+            </span>
+          </div>
         </div>
 
-        {unknownFaces.length > 0 ? (
+        {/* Content Area: Empty State vs Clusters View vs All Faces View */}
+        {unknownFaces.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '36px', color: 'var(--text-dim)', fontSize: '0.85rem' }}>
+            <HelpCircle size={32} style={{ margin: '0 auto 8px auto', opacity: 0.4, display: 'block' }} />
+            No unknown faces pending review.
+          </div>
+        ) : viewMode === 'clusters' && faceClusters.length > 0 ? (
+          /* Clusters View */
           <div style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
             gap: '16px'
           }}>
-            {unknownFaces.map((face) => (
-              <div key={face.filename} style={{
+            {faceClusters.map((cluster, cIdx) => (
+              <div key={cluster.cluster_id || cIdx} style={{
                 borderRadius: 'var(--radius-md)',
-                background: 'rgba(15, 23, 42, 0.7)',
+                background: 'rgba(15, 23, 42, 0.75)',
                 border: '1px solid var(--border-subtle)',
                 overflow: 'hidden',
                 display: 'flex',
-                flexDirection: 'column'
+                flexDirection: 'column',
+                transition: 'transform 0.2s ease, border-color 0.2s ease',
+                position: 'relative'
               }}>
+                {/* Cluster Header Badge */}
+                <div style={{
+                  padding: '8px 12px',
+                  background: 'rgba(30, 41, 59, 0.6)',
+                  borderBottom: '1px solid rgba(255, 255, 255, 0.05)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center'
+                }}>
+                  <span style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                    Person #{cIdx + 1}
+                  </span>
+                  <span style={{
+                    fontSize: '0.68rem',
+                    padding: '2px 6px',
+                    borderRadius: '4px',
+                    background: cluster.count > 1 ? 'rgba(99, 102, 241, 0.25)' : 'rgba(100, 116, 139, 0.25)',
+                    color: cluster.count > 1 ? '#a5b4fc' : 'var(--text-dim)',
+                    fontWeight: 600,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                  }}>
+                    <Users size={10} />
+                    {cluster.count} {cluster.count === 1 ? 'crop' : 'crops'}
+                  </span>
+                </div>
+
+                {/* Main Representative Photo */}
                 <div style={{ height: '140px', background: '#090d16', position: 'relative' }}>
                   <img
-                    src={getUnknownImageUrl(face.filename)}
-                    alt="Unknown face"
+                    src={getUnknownImageUrl(cluster.representative)}
+                    alt="Representative face"
                     style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                     onError={(e) => { e.target.style.display = 'none'; }}
                   />
-                </div>
-                <div style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>
-                    {face.created ? new Date(face.created).toLocaleTimeString() : 'Recent'}
+                  <span style={{
+                    position: 'absolute',
+                    bottom: '6px',
+                    left: '8px',
+                    fontSize: '0.68rem',
+                    background: 'rgba(0, 0, 0, 0.65)',
+                    padding: '2px 6px',
+                    borderRadius: '4px',
+                    color: 'var(--text-dim)',
+                    backdropFilter: 'blur(4px)'
+                  }}>
+                    {cluster.faces?.[0]?.created ? new Date(cluster.faces[0].created).toLocaleTimeString() : 'Recent'}
                   </span>
+                </div>
 
-                  {registeringFace === face.filename ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      <input
-                        type="text"
-                        className="input-field"
-                        placeholder="Student name"
-                        value={studentNameInput}
-                        onChange={(e) => setStudentNameInput(e.target.value)}
-                        autoFocus
-                        style={{ padding: '6px 8px', fontSize: '0.75rem' }}
-                      />
-                      <div style={{ display: 'flex', gap: '4px' }}>
-                        <button
-                          className="btn btn-success"
-                          style={{ flex: 1, padding: '4px', fontSize: '0.75rem' }}
-                          onClick={() => handleRegisterUnknown(face.filename)}
-                        >
-                          <Check size={12} />
-                          <span>Save</span>
-                        </button>
-                        <button
-                          className="btn btn-secondary"
-                          style={{ padding: '4px 8px' }}
-                          onClick={() => setRegisteringFace(null)}
-                        >
-                          <X size={12} />
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div style={{ display: 'flex', gap: '6px' }}>
-                      <button
-                        className="btn btn-primary"
-                        style={{ flex: 1, padding: '6px 8px', fontSize: '0.75rem' }}
-                        onClick={() => {
-                          setRegisteringFace(face.filename);
-                          setStudentNameInput('');
+                {/* Sub-strip preview thumbnails if cluster has multiple photos */}
+                {cluster.faces && cluster.faces.length > 1 && (
+                  <div style={{
+                    display: 'flex',
+                    gap: '4px',
+                    padding: '6px 10px',
+                    background: 'rgba(10, 15, 30, 0.5)',
+                    borderBottom: '1px solid rgba(255, 255, 255, 0.05)',
+                    overflowX: 'auto',
+                    alignItems: 'center'
+                  }}>
+                    {cluster.faces.slice(1, 5).map((f, i) => (
+                      <img
+                        key={f.filename || i}
+                        src={getUnknownImageUrl(f.filename)}
+                        alt="Face thumbnail"
+                        style={{
+                          width: '30px',
+                          height: '30px',
+                          borderRadius: '4px',
+                          objectFit: 'cover',
+                          border: '1px solid rgba(255, 255, 255, 0.1)',
+                          flexShrink: 0
                         }}
-                      >
-                        Register
-                      </button>
-                      <button
-                        className="btn btn-secondary"
-                        style={{ padding: '6px 8px' }}
-                        onClick={() => handleIgnoreUnknown(face.filename)}
-                        title="Dismiss"
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-                  )}
+                      />
+                    ))}
+                    {cluster.faces.length > 5 && (
+                      <span style={{
+                        fontSize: '0.65rem',
+                        color: 'var(--text-dim)',
+                        background: 'rgba(255,255,255,0.06)',
+                        padding: '4px 6px',
+                        borderRadius: '4px',
+                        flexShrink: 0
+                      }}>
+                        +{cluster.faces.length - 5}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* Action Buttons */}
+                <div style={{ padding: '10px 12px', display: 'flex', gap: '8px' }}>
+                  <button
+                    className="btn btn-primary"
+                    style={{ flex: 1, padding: '6px 10px', fontSize: '0.75rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                    onClick={() => handleOpenRegisterModal(cluster.faces)}
+                    title="Review face crops and enroll this student"
+                  >
+                    <UserPlus size={13} />
+                    <span>Register ({cluster.count})</span>
+                  </button>
+                  <button
+                    className="btn btn-secondary"
+                    style={{ padding: '6px 10px' }}
+                    onClick={() => handleIgnoreCluster(cluster)}
+                    title="Dismiss this entire cluster"
+                  >
+                    <X size={14} />
+                  </button>
                 </div>
               </div>
             ))}
           </div>
         ) : (
-          <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-dim)', fontSize: '0.85rem' }}>
-            No unknown faces pending review.
+          /* All Individual Faces View */
+          <div>
+            {faceClusters.length === 0 && unknownFaces.length > 0 && (
+              <div style={{
+                padding: '12px 16px',
+                marginBottom: '16px',
+                borderRadius: '8px',
+                background: 'rgba(99, 102, 241, 0.1)',
+                border: '1px solid rgba(99, 102, 241, 0.25)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: '10px'
+              }}>
+                <div style={{ fontSize: '0.8rem', color: '#c7d2fe' }}>
+                  💡 <strong>Tip:</strong> You have {unknownFaces.length} pending face captures. Click <strong>Clusterify</strong> above to automatically group identical people together!
+                </div>
+                <button
+                  className="btn btn-primary"
+                  style={{ fontSize: '0.75rem', padding: '4px 10px' }}
+                  onClick={handleClusterify}
+                  disabled={clusteringLoading}
+                >
+                  <Sparkles size={12} />
+                  <span>Clusterify Now</span>
+                </button>
+              </div>
+            )}
+
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+              gap: '16px'
+            }}>
+              {unknownFaces.map((face) => (
+                <div key={face.filename} style={{
+                  borderRadius: 'var(--radius-md)',
+                  background: 'rgba(15, 23, 42, 0.7)',
+                  border: '1px solid var(--border-subtle)',
+                  overflow: 'hidden',
+                  display: 'flex',
+                  flexDirection: 'column'
+                }}>
+                  <div style={{ height: '140px', background: '#090d16', position: 'relative' }}>
+                    <img
+                      src={getUnknownImageUrl(face.filename)}
+                      alt="Unknown face"
+                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                      onError={(e) => { e.target.style.display = 'none'; }}
+                    />
+                  </div>
+                  <div style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>
+                      {face.created ? new Date(face.created).toLocaleTimeString() : 'Recent'}
+                    </span>
+
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <button
+                        className="btn btn-primary"
+                        style={{ flex: 1, padding: '6px 8px', fontSize: '0.75rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}
+                        onClick={() => handleRegisterFaceClick(face)}
+                        title="Enroll student using this face crop (or cluster)"
+                      >
+                        <UserPlus size={13} />
+                        <span>Register</span>
+                      </button>
+                      <button
+                        className="btn btn-secondary"
+                        style={{ padding: '6px 8px' }}
+                        onClick={() => handleIgnoreFace(face.filename)}
+                        title="Dismiss"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>
@@ -718,6 +1115,288 @@ export default function DashboardView({ stats, setActiveTab, onRefresh }) {
           </div>
         )}
       </div>
+
+      {/* Interactive Registration Modal with False-Positive Deletion */}
+      {modalOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(5, 8, 22, 0.85)',
+            backdropFilter: 'blur(8px)',
+            WebkitBackdropFilter: 'blur(8px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 9999,
+            padding: '20px'
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !regSubmitting) {
+              setModalOpen(false);
+            }
+          }}
+        >
+          <div style={{
+            width: '100%',
+            maxWidth: '680px',
+            maxHeight: '90vh',
+            overflowY: 'auto',
+            background: 'linear-gradient(135deg, rgba(26, 31, 55, 0.96), rgba(15, 20, 38, 0.98))',
+            border: '1px solid rgba(255, 255, 255, 0.15)',
+            borderRadius: 'var(--radius-lg, 16px)',
+            boxShadow: '0 20px 50px rgba(0, 0, 0, 0.6), 0 0 30px rgba(99, 102, 241, 0.2)',
+            padding: '28px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '20px',
+            position: 'relative'
+          }}>
+            {/* Modal Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <div>
+                <h3 style={{ fontSize: '1.25rem', fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <UserPlus size={20} color="#8b5cf6" />
+                  Register Student from Unknown Face(s)
+                </h3>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '4px', marginBottom: 0 }}>
+                  Review face crops ({modalFaces.length} selected). Remove any blurry crops or false positives (e.g. hands, background objects) before training embeddings.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ padding: '6px', borderRadius: '50%', width: '32px', height: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                onClick={() => setModalOpen(false)}
+                disabled={regSubmitting}
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* Face Crops Grid with False-Positive Removal */}
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                <label style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                  Selected Face Crops ({modalFaces.length})
+                </label>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
+                  Click <X size={12} style={{ display: 'inline', verticalAlign: 'middle', color: '#ef4444' }} /> on any image to remove false positives
+                </span>
+              </div>
+
+              {modalFaces.length === 0 ? (
+                <div style={{
+                  padding: '24px',
+                  textAlign: 'center',
+                  background: 'rgba(239, 68, 68, 0.1)',
+                  borderRadius: '10px',
+                  border: '1px dashed #ef4444',
+                  color: '#fca5a5',
+                  fontSize: '0.85rem'
+                }}>
+                  All faces have been removed from this batch. Please close this modal or cancel.
+                </div>
+              ) : (
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(85px, 1fr))',
+                  gap: '10px',
+                  maxHeight: '220px',
+                  overflowY: 'auto',
+                  padding: '10px',
+                  background: 'rgba(10, 15, 30, 0.6)',
+                  borderRadius: '10px',
+                  border: '1px solid rgba(255, 255, 255, 0.08)'
+                }}>
+                  {modalFaces.map((f, idx) => (
+                    <div
+                      key={f.filename || idx}
+                      style={{
+                        position: 'relative',
+                        borderRadius: '8px',
+                        overflow: 'hidden',
+                        border: '1px solid rgba(255, 255, 255, 0.15)',
+                        aspectRatio: '1 / 1',
+                        background: '#070b14'
+                      }}
+                    >
+                      <img
+                        src={getUnknownImageUrl(f.filename)}
+                        alt="Crop thumbnail"
+                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                        onError={(e) => { e.target.style.display = 'none'; }}
+                      />
+                      <button
+                        type="button"
+                        title="Remove false positive"
+                        onClick={() => handleRemoveFaceFromBatch(f.filename)}
+                        disabled={regSubmitting}
+                        style={{
+                          position: 'absolute',
+                          top: '4px',
+                          right: '4px',
+                          width: '22px',
+                          height: '22px',
+                          borderRadius: '50%',
+                          background: 'rgba(239, 68, 68, 0.9)',
+                          border: 'none',
+                          color: '#ffffff',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          boxShadow: '0 2px 4px rgba(0,0,0,0.6)',
+                          transition: 'transform 0.15s ease, background 0.15s ease'
+                        }}
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Registration Form */}
+            <form onSubmit={handleSubmitRegister} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '14px' }}>
+                <div>
+                  <label style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginBottom: '4px', display: 'block' }}>
+                    Student Full Name *
+                  </label>
+                  <input
+                    type="text"
+                    className="input-field"
+                    placeholder="e.g. Saptarshi"
+                    value={regForm.name}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setRegForm(prev => ({
+                        ...prev,
+                        name: val,
+                        student_id: (!prev.student_id || prev.student_id === `STU_${prev.name.toUpperCase().replace(/\s+/g, '_')}`)
+                          ? `STU_${val.toUpperCase().replace(/\s+/g, '_')}`
+                          : prev.student_id
+                      }));
+                    }}
+                    required
+                    autoFocus
+                    disabled={regSubmitting}
+                    style={{ width: '100%', padding: '10px 12px' }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginBottom: '4px', display: 'block' }}>
+                    Student ID / Roll Number *
+                  </label>
+                  <input
+                    type="text"
+                    className="input-field"
+                    placeholder="e.g. STU_SAPTARSHI or CS2026_01"
+                    value={regForm.student_id}
+                    onChange={(e) => setRegForm(prev => ({ ...prev, student_id: e.target.value }))}
+                    required
+                    disabled={regSubmitting}
+                    style={{ width: '100%', padding: '10px 12px' }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginBottom: '4px', display: 'block' }}>
+                    Department
+                  </label>
+                  <input
+                    type="text"
+                    className="input-field"
+                    placeholder="e.g. Computer Science"
+                    value={regForm.department}
+                    onChange={(e) => setRegForm(prev => ({ ...prev, department: e.target.value }))}
+                    disabled={regSubmitting}
+                    style={{ width: '100%', padding: '10px 12px' }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginBottom: '4px', display: 'block' }}>
+                    Email (Optional)
+                  </label>
+                  <input
+                    type="email"
+                    className="input-field"
+                    placeholder="e.g. student@college.edu"
+                    value={regForm.email}
+                    onChange={(e) => setRegForm(prev => ({ ...prev, email: e.target.value }))}
+                    disabled={regSubmitting}
+                    style={{ width: '100%', padding: '10px 12px' }}
+                  />
+                </div>
+              </div>
+
+              {/* Feedback Alert */}
+              {regFeedback.message && (
+                <div style={{
+                  padding: '10px 14px',
+                  borderRadius: '8px',
+                  fontSize: '0.82rem',
+                  background: regFeedback.type === 'error' ? 'rgba(239, 68, 68, 0.15)' : 'rgba(34, 197, 94, 0.15)',
+                  border: `1px solid ${regFeedback.type === 'error' ? '#ef4444' : '#22c55e'}`,
+                  color: regFeedback.type === 'error' ? '#fca5a5' : '#86efac',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px'
+                }}>
+                  {regFeedback.type === 'error' ? <AlertCircle size={16} /> : <Check size={16} />}
+                  <span>{regFeedback.message}</span>
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '6px' }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setModalOpen(false)}
+                  disabled={regSubmitting}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={regSubmitting || modalFaces.length === 0 || !regForm.name.trim()}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    minWidth: '180px',
+                    justifyContent: 'center',
+                    background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
+                    border: 'none',
+                    boxShadow: '0 4px 14px rgba(99, 102, 241, 0.35)'
+                  }}
+                >
+                  {regSubmitting ? (
+                    <>
+                      <RefreshCw size={15} className="animate-spin" />
+                      <span>Encoding &amp; Enrolling...</span>
+                    </>
+                  ) : (
+                    <>
+                      <UserPlus size={15} />
+                      <span>Enroll Student ({modalFaces.length} photos)</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
     </div>
   );

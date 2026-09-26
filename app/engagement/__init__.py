@@ -27,15 +27,25 @@ from datetime import datetime, timedelta
 import logging
 import math
 
-# MediaPipe may not be available with solutions API in newer versions
+# MediaPipe support: Try Tasks API first (MediaPipe >= 0.10.x / 1.0+), then legacy solutions
+MEDIAPIPE_TASKS_AVAILABLE = False
 MEDIAPIPE_AVAILABLE = False
 mp = None
+mp_python = None
+mp_vision = None
+
 try:
     import mediapipe as mp
-    # Check if solutions API is available
-    if hasattr(mp, 'solutions') and hasattr(mp.solutions, 'face_mesh'):
+    from mediapipe.tasks import python as mp_python
+    from mediapipe.tasks.python import vision as mp_vision
+    MEDIAPIPE_TASKS_AVAILABLE = True
+except (ImportError, AttributeError):
+    pass
+
+try:
+    if mp is not None and hasattr(mp, 'solutions') and hasattr(mp.solutions, 'face_mesh'):
         MEDIAPIPE_AVAILABLE = True
-except ImportError:
+except Exception:
     pass
 
 import sys
@@ -43,6 +53,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from config import config
+
+FACE_LANDMARKER_MODEL_PATH = Path(__file__).parent.parent.parent / "models" / "face_landmarker.task"
+
 
 
 # Configure module logger
@@ -185,13 +198,36 @@ class FaceMeshAnalyzer:
             max_faces: Maximum number of faces to track
         """
         self.use_mediapipe = False
+        self._task_landmarker = None
         self.face_mesh = None
         self.mp_face_mesh = None
         self.mp_drawing = None
         self.mp_drawing_styles = None
         self._face_cascade = None
         
-        if MEDIAPIPE_AVAILABLE:
+        # 1. Try modern MediaPipe Tasks FaceLandmarker (high speed ~13ms, with blendshapes)
+        if MEDIAPIPE_TASKS_AVAILABLE and FACE_LANDMARKER_MODEL_PATH.exists():
+            try:
+                base_options = mp_python.BaseOptions(model_asset_path=str(FACE_LANDMARKER_MODEL_PATH))
+                options = mp_vision.FaceLandmarkerOptions(
+                    base_options=base_options,
+                    output_face_blendshapes=True,
+                    num_faces=max_faces
+                )
+                if hasattr(mp_vision, 'FaceLandmarker'):
+                    try:
+                        mp_vision.FaceLandmarker.__del__ = lambda self: None
+                    except Exception:
+                        pass
+                self._task_landmarker = mp_vision.FaceLandmarker.create_from_options(options)
+                self.use_mediapipe = True
+                logger.info("Using MediaPipe Tasks FaceLandmarker for high-speed engagement tracking")
+            except Exception as e:
+                logger.warning(f"MediaPipe Tasks FaceLandmarker init failed: {e}")
+                self._task_landmarker = None
+
+        # 2. Fall back to legacy MediaPipe solutions.face_mesh if available
+        if not self.use_mediapipe and MEDIAPIPE_AVAILABLE:
             try:
                 self.mp_face_mesh = mp.solutions.face_mesh
                 self.mp_drawing = mp.solutions.drawing_utils
@@ -205,12 +241,12 @@ class FaceMeshAnalyzer:
                     min_tracking_confidence=min_tracking_confidence
                 )
                 self.use_mediapipe = True
-                logger.info("Using MediaPipe FaceMesh for engagement tracking")
+                logger.info("Using legacy MediaPipe FaceMesh for engagement tracking")
             except Exception as e:
-                logger.warning(f"MediaPipe FaceMesh init failed: {e}")
+                logger.warning(f"Legacy MediaPipe FaceMesh init failed: {e}")
         
+        # 3. OpenCV fallback if MediaPipe is completely unavailable
         if not self.use_mediapipe:
-            # Fall back to OpenCV Haar Cascade for basic face detection
             cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
             self._face_cascade = cv2.CascadeClassifier(cascade_path)
             logger.info("Using OpenCV fallback for engagement (limited features)")
@@ -249,26 +285,74 @@ class FaceMeshAnalyzer:
             
             faces_data = []
             
-            if self.use_mediapipe and self.face_mesh is not None:
-                # Use MediaPipe FaceMesh
+            if self._task_landmarker is not None:
+                # Modern MediaPipe Tasks FaceLandmarker
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+                result = self._task_landmarker.detect(mp_img)
+                
+                if result.face_landmarks:
+                    for i, face_lms in enumerate(result.face_landmarks):
+                        landmarks = {}
+                        xs = []
+                        ys = []
+                        for idx, lm in enumerate(face_lms):
+                            px = int(lm.x * width)
+                            py = int(lm.y * height)
+                            landmarks[idx] = (px, py, lm.z * width)
+                            xs.append(px)
+                            ys.append(py)
+                        landmarks['estimated'] = False
+                        
+                        min_x, max_x = max(0, min(xs)), min(width, max(xs))
+                        min_y, max_y = max(0, min(ys)), min(height, max(ys))
+                        center = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0)
+                        bbox = (min_x, min_y, max_x - min_x, max_y - min_y)
+                        
+                        blendshapes = {}
+                        if result.face_blendshapes and i < len(result.face_blendshapes):
+                            blendshapes = {b.category_name: b.score for b in result.face_blendshapes[i]}
+                        
+                        faces_data.append({
+                            'landmarks': landmarks,
+                            'raw_landmarks': face_lms,
+                            'center': center,
+                            'bbox': bbox,
+                            'blendshapes': blendshapes,
+                            'estimated': False
+                        })
+            elif self.use_mediapipe and self.face_mesh is not None:
+                # Legacy MediaPipe FaceMesh
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 results = self.face_mesh.process(rgb_frame)
                 
                 if results.multi_face_landmarks:
                     for face_landmarks in results.multi_face_landmarks:
                         landmarks = {}
+                        xs = []
+                        ys = []
                         for idx, lm in enumerate(face_landmarks.landmark):
-                            landmarks[idx] = (
-                                int(lm.x * width),
-                                int(lm.y * height),
-                                lm.z * width
-                            )
+                            px = int(lm.x * width)
+                            py = int(lm.y * height)
+                            landmarks[idx] = (px, py, lm.z * width)
+                            xs.append(px)
+                            ys.append(py)
+                        landmarks['estimated'] = False
+                        
+                        min_x, max_x = max(0, min(xs)), min(width, max(xs))
+                        min_y, max_y = max(0, min(ys)), min(height, max(ys))
+                        center = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0)
+                        bbox = (min_x, min_y, max_x - min_x, max_y - min_y)
                         
                         faces_data.append({
                             'landmarks': landmarks,
-                            'raw_landmarks': face_landmarks
+                            'raw_landmarks': face_landmarks,
+                            'center': center,
+                            'bbox': bbox,
+                            'blendshapes': {},
+                            'estimated': False
                         })
-            else:
+            elif self._face_cascade is not None:
                 # OpenCV fallback - provide estimated landmarks from face detection
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 faces = self._face_cascade.detectMultiScale(
@@ -276,11 +360,14 @@ class FaceMeshAnalyzer:
                 )
                 
                 for (x, y, w, h) in faces:
-                    # Create estimated landmarks from face box
                     landmarks = self._estimate_landmarks_from_box(x, y, w, h)
+                    center = (x + w / 2.0, y + h / 2.0)
                     faces_data.append({
                         'landmarks': landmarks,
                         'raw_landmarks': None,
+                        'center': center,
+                        'bbox': (x, y, w, h),
+                        'blendshapes': {},
                         'estimated': True
                     })
             
@@ -296,9 +383,6 @@ class FaceMeshAnalyzer:
         Used as fallback when MediaPipe is unavailable.
         """
         landmarks = {}
-        
-        # Estimate key landmark positions based on face proportions
-        # These indices match MediaPipe's landmark indices for compatibility
         
         # Eyes (approximate positions)
         left_eye_x = x + int(0.3 * w)
@@ -356,14 +440,14 @@ class FaceMeshAnalyzer:
                 # Horizontal distance
                 h = np.linalg.norm(np.array(points[0]) - np.array(points[3]))
                 
-                if h == 0:
-                    return 0.0
+                if h < 1e-6:
+                    return 0.28
                 
-                ear = (v1 + v2) / (2.0 * h)
+                ear = float((v1 + v2) / (2.0 * h))
                 return ear
                 
             except Exception:
-                return 0.0
+                return 0.28
         
         left_ear = eye_aspect_ratio(self.LEFT_EYE_INDICES)
         right_ear = eye_aspect_ratio(self.RIGHT_EYE_INDICES)
@@ -423,9 +507,16 @@ class FaceMeshAnalyzer:
             proj_matrix = np.hstack((rotation_matrix, translation_vector))
             _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(proj_matrix)
             
-            pitch = euler_angles[0][0]
-            yaw = euler_angles[1][0]
-            roll = euler_angles[2][0]
+            pitch = float(euler_angles[0][0])
+            yaw = float(euler_angles[1][0])
+            roll = float(euler_angles[2][0])
+            
+            # Normalize roll (compensate for image Y-inversion where roll is centered around +/-180)
+            if abs(roll) > 90:
+                roll = (180.0 - abs(roll)) * (1.0 if roll > 0 else -1.0)
+            
+            # Offset pitch to center looking forward at webcam around 0
+            pitch = pitch - 22.0
             
             return HeadPose(yaw=yaw, pitch=pitch, roll=roll)
             
@@ -452,30 +543,44 @@ class FaceMeshAnalyzer:
         """
         output = frame.copy()
         
-        if draw_tesselation:
-            self.mp_drawing.draw_landmarks(
-                image=output,
-                landmark_list=raw_landmarks,
-                connections=self.mp_face_mesh.FACEMESH_TESSELATION,
-                landmark_drawing_spec=None,
-                connection_drawing_spec=self.mp_drawing_styles.get_default_face_mesh_tesselation_style()
-            )
-        
-        # Draw contours
-        self.mp_drawing.draw_landmarks(
-            image=output,
-            landmark_list=raw_landmarks,
-            connections=self.mp_face_mesh.FACEMESH_CONTOURS,
-            landmark_drawing_spec=None,
-            connection_drawing_spec=self.mp_drawing_styles.get_default_face_mesh_contours_style()
-        )
+        if self.mp_drawing and self.mp_face_mesh and raw_landmarks:
+            try:
+                if draw_tesselation:
+                    self.mp_drawing.draw_landmarks(
+                        image=output,
+                        landmark_list=raw_landmarks,
+                        connections=self.mp_face_mesh.FACEMESH_TESSELATION,
+                        landmark_drawing_spec=None,
+                        connection_drawing_spec=self.mp_drawing_styles.get_default_face_mesh_tesselation_style()
+                    )
+                
+                # Draw contours
+                self.mp_drawing.draw_landmarks(
+                    image=output,
+                    landmark_list=raw_landmarks,
+                    connections=self.mp_face_mesh.FACEMESH_CONTOURS,
+                    landmark_drawing_spec=None,
+                    connection_drawing_spec=self.mp_drawing_styles.get_default_face_mesh_contours_style()
+                )
+            except Exception:
+                pass
         
         return output
     
     def release(self):
-        """Release resources."""
+        """Release resources safely."""
+        if self._task_landmarker:
+            try:
+                self._task_landmarker.close()
+            except Exception:
+                pass
+            self._task_landmarker = None
         if self.face_mesh:
-            self.face_mesh.close()
+            try:
+                self.face_mesh.close()
+            except Exception:
+                pass
+            self.face_mesh = None
 
 
 class EngagementTracker:
@@ -513,7 +618,8 @@ class EngagementTracker:
                 'ear_history': deque(maxlen=self.history_size),
                 'blink_times': deque(maxlen=60),  # Track last 60 blinks
                 'eyes_closed_frames': 0,
-                'last_ear': 1.0,
+                'last_ear': 0.30,
+                'created_at': datetime.now(),
                 'engagement_history': deque(maxlen=self.history_size),
                 'head_pose_history': deque(maxlen=self.history_size)
             }
@@ -533,19 +639,44 @@ class EngagementTracker:
         results = []
         faces_data = self.analyzer.process(frame)
         
-        # If analyzer found no faces or fewer than detections, complement with detector's bboxes
-        if detections and (not faces_data or len(faces_data) < len(detections)):
-            if not faces_data:
-                for det in detections:
+        # Match detections to detected landmark faces by spatial proximity
+        matched_face_data = []
+        if detections:
+            used_lm_indices = set()
+            for det in detections:
+                det_cx, det_cy = det.center
+                best_idx = None
+                best_dist = float('inf')
+                for i, fd in enumerate(faces_data):
+                    if i in used_lm_indices:
+                        continue
+                    if 'center' in fd:
+                        fcx, fcy = fd['center']
+                    else:
+                        fcx = fd['landmarks'][1][0]
+                        fcy = fd['landmarks'][1][1]
+                    dist = ((det_cx - fcx)**2 + (det_cy - fcy)**2) ** 0.5
+                    max_dim = max(det.bbox[2], det.bbox[3]) * 1.5
+                    if dist < max_dim and dist < best_dist:
+                        best_dist = dist
+                        best_idx = i
+                
+                if best_idx is not None:
+                    used_lm_indices.add(best_idx)
+                    matched_face_data.append(faces_data[best_idx])
+                else:
                     x, y, w, h = det.bbox
                     landmarks = self.analyzer._estimate_landmarks_from_box(x, y, w, h)
-                    faces_data.append({
+                    matched_face_data.append({
                         'landmarks': landmarks,
                         'raw_landmarks': None,
+                        'blendshapes': {},
                         'estimated': True
                     })
+        else:
+            matched_face_data = faces_data
         
-        for face_id, face_data in enumerate(faces_data):
+        for face_id, face_data in enumerate(matched_face_data):
             landmarks = face_data['landmarks']
             
             # Get tracking data for this face
@@ -553,13 +684,14 @@ class EngagementTracker:
             
             # Calculate EAR
             left_ear, right_ear = self.analyzer.calculate_ear(landmarks)
-            avg_ear = (left_ear + right_ear) / 2
+            avg_ear = (left_ear + right_ear) / 2.0
             
             # Update EAR history
             track_data['ear_history'].append(avg_ear)
             
-            # Detect blink
-            is_blinking = self._detect_blink(track_data, avg_ear)
+            # Detect blink (using EAR and blendshapes)
+            blendshapes = face_data.get('blendshapes', {})
+            is_blinking = self._detect_blink(track_data, avg_ear, blendshapes)
             
             # Update eyes closed counter
             if avg_ear < config.engagement.ear_threshold:
@@ -590,7 +722,7 @@ class EngagementTracker:
             
             # Smooth engagement score
             track_data['engagement_history'].append(engagement_score)
-            smoothed_score = np.mean(list(track_data['engagement_history']))
+            smoothed_score = float(np.mean(list(track_data['engagement_history'])))
             
             # Determine status
             status = self._determine_status(eye_metrics, smoothed_score)
@@ -608,31 +740,60 @@ class EngagementTracker:
         
         return results
     
-    def _detect_blink(self, track_data: Dict, current_ear: float) -> bool:
-        """Detect if a blink occurred."""
+    def _detect_blink(self, track_data: Dict, current_ear: float, blendshapes: Optional[Dict] = None) -> bool:
+        """Detect a complete blink cycle (open -> closed -> re-opened)."""
         threshold = config.engagement.blink_threshold
-        last_ear = track_data['last_ear']
+        now = datetime.now()
+        
+        # Check if eyes are currently closed (either low EAR or high blendshape blink score)
+        blend_closed = False
+        if blendshapes:
+            left_b = blendshapes.get('eyeBlinkLeft', 0.0)
+            right_b = blendshapes.get('eyeBlinkRight', 0.0)
+            if left_b > 0.55 and right_b > 0.55:
+                blend_closed = True
+                
+        is_closed = (current_ear < threshold) or blend_closed
+        
+        closed_frames = track_data.get('blink_closed_frames', 0)
+        is_blinking = False
+        
+        if is_closed:
+            track_data['blink_closed_frames'] = closed_frames + 1
+            is_blinking = True
+        else:
+            # Eyes are currently open. If they were closed for 1 to 10 frames (~30ms to 400ms), that's a completed blink!
+            if 1 <= closed_frames <= 10:
+                last_blink_time = track_data['blink_times'][-1] if track_data['blink_times'] else None
+                if last_blink_time is None or (now - last_blink_time).total_seconds() > 0.25:
+                    track_data['blink_times'].append(now)
+            track_data['blink_closed_frames'] = 0
+            
         track_data['last_ear'] = current_ear
-        
-        # Blink detected when EAR drops below threshold
-        if last_ear > threshold and current_ear < threshold:
-            track_data['blink_times'].append(datetime.now())
-            return True
-        
-        return False
+        return is_blinking
     
     def _calculate_blink_rate(self, track_data: Dict) -> float:
-        """Calculate blinks per minute."""
+        """Calculate blinks per minute with smooth startup ramping."""
         now = datetime.now()
         one_minute_ago = now - timedelta(minutes=1)
         
-        # Count blinks in last minute
+        # Count completed blinks in the last 60 seconds
         recent_blinks = [
             t for t in track_data['blink_times']
             if t > one_minute_ago
         ]
         
-        return float(len(recent_blinks))
+        created_at = track_data.get('created_at', now)
+        elapsed = (now - created_at).total_seconds()
+        
+        # Before 30 seconds of observation, blend the actual count with standard normal rate (17 bpm)
+        if elapsed < 30.0:
+            weight = max(0.0, elapsed / 30.0)
+            extrapolated = float(len(recent_blinks)) * (60.0 / max(5.0, elapsed))
+            extrapolated = min(35.0, max(8.0, extrapolated))
+            return round((1.0 - weight) * 17.0 + weight * extrapolated, 1)
+        else:
+            return float(len(recent_blinks))
     
     def _calculate_engagement_score(
         self,

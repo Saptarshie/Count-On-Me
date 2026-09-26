@@ -22,11 +22,13 @@ from flask import (
 from datetime import datetime, date
 from pathlib import Path
 import threading
+import queue
 import time
 import logging
 import io
 import shutil
 import json
+from typing import Dict, Tuple, Optional, List, Any
 
 import sys
 if hasattr(sys.stdout, 'reconfigure'):
@@ -37,8 +39,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import config
 from app.detection import FaceDetector, FaceDetection
-from app.recognition import FaceRecognizer, DatasetEncoder, TemporalVotingRecognizer
-from app.engagement import EngagementTracker, EngagementStatus, StudentEngagementAnalyzer
+from app.recognition import FaceRecognizer, DatasetEncoder, TemporalVotingRecognizer, RecognitionResult
+from app.engagement import (
+    EngagementTracker, EngagementStatus, StudentEngagementAnalyzer,
+    EngagementMetrics, EyeMetrics, HeadPose
+)
 from app.database import DatabaseService, Student, AttendanceRecord, Session
 from app.utils import (
     CameraStream, setup_logging, get_logger, FPSCounter,
@@ -103,9 +108,26 @@ class SystemState:
         # Unknown face queue (cropped faces saved for teacher review)
         self._unknown_last_saved: dict = {}  # track_key -> datetime
         
+        # Recognition queue and background batch worker
+        self._recog_queue = queue.Queue(maxsize=32)
+        self._recog_thread = None
+        
+        # Spatial track cache: track_id -> track dict
+        self._tracks: Dict[int, dict] = {}
+        self._next_track_id = 1
+        self._track_lock = threading.Lock()
+        self._student_last_seen: Dict[str, float] = {}
+        
         self._lock = threading.Lock()
         self._processing_thread = None
         self._stop_event = threading.Event()
+        
+        # Database query caching & throttling for high-FPS streaming
+        self._last_active_session = None
+        self._last_session_check_time = 0.0
+        self._cached_attendance_count = 0
+        self._last_count_check_time = 0.0
+        self._last_db_score_update: Dict[str, float] = {}
     
     def initialize(self):
         """Initialize all system components."""
@@ -150,22 +172,42 @@ class SystemState:
             self.camera.stop()
             self.camera = None
         
+        with self._track_lock:
+            self._tracks.clear()
+            self._student_last_seen.clear()
+            self.tracked_students.clear()
+            
+        while not self._recog_queue.empty():
+            try:
+                self._recog_queue.get_nowait()
+                self._recog_queue.task_done()
+            except Exception:
+                break
+        
         self.is_running = False
     
     def _start_processing(self):
-        """Start the background processing thread."""
+        """Start background processing and recognition threads."""
         self._stop_event.clear()
         self._processing_thread = threading.Thread(
             target=self._processing_loop,
             daemon=True
         )
         self._processing_thread.start()
+        
+        self._recog_thread = threading.Thread(
+            target=self._recognition_worker,
+            daemon=True
+        )
+        self._recog_thread.start()
     
     def _stop_processing(self):
-        """Stop the background processing thread."""
+        """Stop background processing and recognition threads."""
         self._stop_event.set()
         if self._processing_thread:
             self._processing_thread.join(timeout=2.0)
+        if self._recog_thread:
+            self._recog_thread.join(timeout=2.0)
     
     def _processing_loop(self):
         """Main processing loop for face detection, recognition, and engagement."""
@@ -212,164 +254,293 @@ class SystemState:
     
     def _update_adaptive_stride(self):
         """
-        Select processing stride from current FPS:
-            FPS > 20 -> every 3rd frame
-            FPS 10-20 -> every 2nd frame
-            FPS < 10 -> every frame
-        This is an explicit accuracy-vs-latency tradeoff: skip only when
-        the pipeline has spare capacity.
+        Adjust frame skipping based on processing capacity.
+        If FPS drops below adaptive_low_fps, skip frames to relieve CPU.
         """
         fps = self.fps_counter.get_fps()
-        if fps > config.detection.adaptive_high_fps:
-            new_stride = config.detection.stride_high
-        elif fps > config.detection.adaptive_low_fps:
+        if not config.detection.adaptive_skip_enabled:
+            self._adaptive_stride = max(1, config.detection.frame_skip)
+            return
+            
+        if fps < config.detection.adaptive_low_fps:
             new_stride = config.detection.stride_mid
         else:
-            new_stride = config.detection.stride_low
+            new_stride = 1
         
         if new_stride != self._adaptive_stride:
-            logger.debug(f"Adaptive stride: {self._adaptive_stride} -> {new_stride} "
-                          f"(FPS {fps:.1f})")
             self._adaptive_stride = new_stride
+
+    def _recognition_worker(self):
+        """
+        Background worker that continuously pulls face crops from the queue,
+        batches them into a single tensor, and runs vectorized face recognition.
+        This completely decouples heavy deep learning inference from the real-time
+        video streaming loop.
+        """
+        logger.info("Face recognition background worker started.")
+        while not self._stop_event.is_set():
+            try:
+                try:
+                    first_item = self._recog_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
+                batch = [first_item]
+                max_batch = getattr(config.recognition, 'batch_size', 4)
+                while len(batch) < max_batch:
+                    try:
+                        batch.append(self._recog_queue.get_nowait())
+                    except queue.Empty:
+                        break
+
+                track_ids = [item[0] for item in batch]
+                face_imgs = [item[1] for item in batch]
+
+                # Batched DeepFace inference (vectorized cosine similarity)
+                results = self.recognizer.recognize_batch(face_imgs)
+
+                now = time.time()
+                for tid, res, img in zip(track_ids, results, face_imgs):
+                    track_key = f"t_{tid}"
+                    if config.temporal.enabled:
+                        accepted_name = self.temporal_recognizer.observe(
+                            track_key, res.name, res.confidence
+                        )
+                        if accepted_name is None:
+                            is_known = False
+                        else:
+                            is_known = True
+                            res.name = accepted_name
+                    else:
+                        is_known = res.is_known
+
+                    if not is_known:
+                        self._save_unknown_face(img, track_key, res.confidence)
+
+                    with self._track_lock:
+                        if tid in self._tracks:
+                            self._tracks[tid]["result"] = res
+                            self._tracks[tid]["is_known"] = is_known
+                            self._tracks[tid]["in_flight"] = False
+                            self._tracks[tid]["last_recog"] = now
+
+                for _ in batch:
+                    self._recog_queue.task_done()
+
+            except Exception as e:
+                logger.error(f"Recognition worker error: {e}", exc_info=True)
+                time.sleep(0.05)
     
     def _process_frame(self, frame: np.ndarray) -> np.ndarray:
-        """Process a single frame."""
+        """
+        Process a single frame with 25-30 FPS real-time performance:
+        1. MediaPipe Face Detection (fast, ~10ms)
+        2. Configurable False-Positive Noise Filter (ignores tiny non-face artifacts)
+        3. MediaPipe Engagement Tracking (fast, ~8ms)
+        4. Spatial Track Association with Cached Recognition (instant, <1ms)
+        5. Asynchronous enqueue for stale/new tracks without blocking the preview stream.
+        """
         output = frame.copy()
         height, width = frame.shape[:2]
         
-        # Detect faces
+        # 1. Detect faces
         detections = self.detector.detect(frame)
         
-        # Get engagement data (passing detections ensures fallback always matches)
-        engagement_results = self.engagement_tracker.track(frame, detections=detections)
+        # 2. Configurable False-Positive Noise Filter
+        min_size = getattr(config.detection, 'min_face_size', 55)
+        valid_detections = [
+            d for d in detections 
+            if d.bbox[2] >= min_size and d.bbox[3] >= min_size
+        ]
         
-        # Process each detection
-        for idx, det in enumerate(detections):
-            x, y, w, h = det.bbox
+        # 3. Fast Engagement Tracking
+        engagement_results = self.engagement_tracker.track(frame, detections=valid_detections)
+        
+        # 4. Spatial Track Association
+        now = time.time()
+        ttl = getattr(config.recognition, 'cache_ttl_seconds', 3.0)
+        
+        with self._track_lock:
+            # Expire tracks not seen for > 3.0s
+            dead_tids = [
+                tid for tid, trk in self._tracks.items()
+                if (now - trk["last_seen"]) > 3.0
+            ]
+            for tid in dead_tids:
+                del self._tracks[tid]
             
-            # Stable track key: spatially-bucketed centroid (simple tracker)
-            cx, cy = det.center
-            track_key = f"t{cx // 80}_{cy // 80}"
+            matched_tids = set()
+            det_to_track = []
             
-            # Extract face for recognition
-            face_img = self.detector.extract_face(frame, det)
-            
-            if face_img is not None:
-                # Recognize face
-                result = self.recognizer.recognize(face_img)
+            for det in valid_detections:
+                cx, cy = det.center
+                best_tid = None
+                best_dist = 110.0  # Max pixel movement between frames for same face
                 
-                # ------------------------------------------------------
-                # TEMPORAL VOTING: aggregate observations per track and
-                # accept identity only on majority agreement.
-                # ------------------------------------------------------
-                if config.temporal.enabled:
-                    accepted_name = self.temporal_recognizer.observe(
-                        track_key, result.name, result.confidence
-                    )
-                    if accepted_name is None:
-                        # Not enough votes yet -> treat as unidentified
-                        is_known = False
-                    else:
-                        is_known = True
-                        result.name = accepted_name
+                for tid, trk in self._tracks.items():
+                    if tid in matched_tids:
+                        continue
+                    tcx, tcy = trk["center"]
+                    dist = ((cx - tcx)**2 + (cy - tcy)**2) ** 0.5
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_tid = tid
+                
+                if best_tid is not None:
+                    matched_tids.add(best_tid)
+                    trk = self._tracks[best_tid]
+                    trk["center"] = (cx, cy)
+                    trk["bbox"] = det.bbox
+                    trk["last_seen"] = now
+                    det_to_track.append(best_tid)
                 else:
-                    is_known = result.is_known
-                
-                # ------------------------------------------------------
-                # UNKNOWN FACE QUEUE: save crops of unidentified faces
-                # for teacher review / later registration.
-                # ------------------------------------------------------
-                if not is_known:
-                    self._save_unknown_face(frame, det, track_key, result.confidence)
-                
-                # Get engagement for this face
-                engagement = None
-                if idx < len(engagement_results):
-                    _, engagement = engagement_results[idx]
-                if engagement is None:
-                    from app.engagement import EyeMetrics, HeadPose
-                    engagement = EngagementMetrics(
-                        head_pose=HeadPose(yaw=0.0, pitch=0.0, roll=0.0),
-                        eye_metrics=EyeMetrics(average_ear=0.28, left_ear=0.28, right_ear=0.28),
-                        blink_rate=16.0,
-                        engagement_score=85.0,
-                        status=EngagementStatus.ATTENTIVE
+                    new_tid = self._next_track_id
+                    self._next_track_id += 1
+                    self._tracks[new_tid] = {
+                        "track_id": new_tid,
+                        "center": (cx, cy),
+                        "bbox": det.bbox,
+                        "last_seen": now,
+                        "last_recog": 0.0,
+                        "result": RecognitionResult(name="Identifying...", confidence=0.0, distance=1.0, is_known=False),
+                        "is_known": False,
+                        "in_flight": False
+                    }
+                    matched_tids.add(new_tid)
+                    det_to_track.append(new_tid)
+        
+        # 5. Non-blocking Async Recognition Queue
+        for det, tid in zip(valid_detections, det_to_track):
+            with self._track_lock:
+                trk = self._tracks.get(tid)
+                if not trk:
+                    continue
+                should_recog = (now - trk["last_recog"] > ttl) and not trk["in_flight"]
+                if should_recog:
+                    trk["in_flight"] = True
+                    trk["last_recog"] = now
+            
+            if should_recog:
+                face_img = self.detector.extract_face(frame, det)
+                if face_img is not None and face_img.size > 0:
+                    try:
+                        self._recog_queue.put_nowait((tid, face_img.copy()))
+                    except queue.Full:
+                        with self._track_lock:
+                            if tid in self._tracks:
+                                self._tracks[tid]["in_flight"] = False
+
+        # 6. Render Overlays Immediately (Zero Latency)
+        # Fetch active session with 2.0s caching to eliminate per-frame SQLite disk locks
+        if (now - self._last_session_check_time) > 2.0 or self._last_active_session is None:
+            try:
+                self._last_active_session = self.db_service.sessions.get_active_session()
+                self._last_session_check_time = now
+            except Exception as e:
+                logger.debug(f"Session query error: {e}")
+        active_sess = self._last_active_session
+        active_sess_id = active_sess.session_id if active_sess else None
+
+        active_seen_names = set()
+        for idx, (det, tid) in enumerate(zip(valid_detections, det_to_track)):
+            x, y, w, h = det.bbox
+            with self._track_lock:
+                trk = self._tracks.get(tid)
+                if trk:
+                    result = trk["result"]
+                    is_known = trk["is_known"]
+                else:
+                    result = RecognitionResult(name="Unknown", confidence=0.0, distance=1.0, is_known=False)
+                    is_known = False
+
+            engagement = None
+            if idx < len(engagement_results):
+                _, engagement = engagement_results[idx]
+            if engagement is None:
+                engagement = EngagementMetrics(
+                    head_pose=HeadPose(yaw=0.0, pitch=0.0, roll=0.0),
+                    eye_metrics=EyeMetrics(average_ear=0.28, left_ear=0.28, right_ear=0.28),
+                    blink_rate=16.0,
+                    engagement_score=85.0,
+                    status=EngagementStatus.ATTENTIVE
+                )
+
+            if is_known:
+                color = (0, 255, 0)
+                name = result.name
+                active_seen_names.add(name)
+                self._student_last_seen[name] = now
+
+                if self.recognizer.can_mark_attendance(name):
+                    eng_score = engagement.engagement_score if engagement else 85.0
+                    success, msg = self.db_service.attendance.mark_attendance(
+                        name, eng_score, session_id=active_sess_id
                     )
-                
-                # Draw bounding box with color based on recognition
-                if is_known:
-                    color = (0, 255, 0)  # Green for known
-                    name = result.name
-                    
-                    # Mark attendance in current active session
-                    active_sess = self.db_service.sessions.get_active_session()
-                    active_sess_id = active_sess.session_id if active_sess else None
-                    
-                    if self.recognizer.can_mark_attendance(name):
-                        eng_score = engagement.engagement_score if engagement else 85.0
-                        success, msg = self.db_service.attendance.mark_attendance(
-                            name, eng_score, session_id=active_sess_id
-                        )
-                        if success:
-                            self.recognizer.mark_attendance_logged(name)
-                            logger.info(f"Attendance marked for {name} in session {active_sess_id}")
-                    
-                    # Update student engagement
-                    if engagement:
-                        self.student_analyzer.update_student(name, engagement)
-                        self.tracked_students[name] = engagement
-                        
-                        # Update engagement score in database for this session
+                    if success:
+                        self.recognizer.mark_attendance_logged(name)
+                        logger.info(f"Attendance marked for {name} in session {active_sess_id}")
+
+                if engagement:
+                    self.student_analyzer.update_student(name, engagement)
+                    self.tracked_students[name] = engagement
+                    # Throttle engagement DB write to at most once per 3.0 seconds per student
+                    last_up = self._last_db_score_update.get(name, 0.0)
+                    if now - last_up > 3.0:
+                        self._last_db_score_update[name] = now
                         self.db_service.attendance.update_engagement_score(
                             name, engagement.engagement_score, session_id=active_sess_id
                         )
-                else:
-                    color = (0, 0, 255)  # Red for unknown
-                    name = "Unknown"
-                
-                # Draw rectangle
-                cv2.rectangle(output, (x, y), (x + w, y + h), color, 2)
-                
-                # Draw name and confidence
-                label = f"{name} ({result.confidence:.2f})"
+            else:
+                color = (0, 0, 255)
+                name = result.name
+
+            cv2.rectangle(output, (x, y), (x + w, y + h), color, 2)
+
+            conf_str = f" ({result.confidence:.2f})" if result.confidence > 0 else ""
+            label = f"{name}{conf_str}"
+            output = draw_text_with_background(
+                output, label, (x, y - 10),
+                color=(255, 255, 255), bg_color=color
+            )
+
+            if engagement and is_known:
+                status_color = {
+                    EngagementStatus.ATTENTIVE: (0, 255, 0),
+                    EngagementStatus.DISTRACTED: (0, 165, 255),
+                    EngagementStatus.SLEEPING: (0, 0, 255),
+                }.get(engagement.status, (128, 128, 128))
+
+                eng_label = f"{engagement.status.value}: {engagement.engagement_score:.0f}%"
                 output = draw_text_with_background(
-                    output, label, (x, y - 10),
-                    color=(255, 255, 255), bg_color=color
+                    output, eng_label, (x, y + h + 20),
+                    color=(255, 255, 255), bg_color=status_color
                 )
-                
-                # Draw engagement if available
-                if engagement and is_known:
-                    status_color = {
-                        EngagementStatus.ATTENTIVE: (0, 255, 0),
-                        EngagementStatus.DISTRACTED: (0, 165, 255),
-                        EngagementStatus.SLEEPING: (0, 0, 255),
-                    }.get(engagement.status, (128, 128, 128))
-                    
-                    eng_label = f"{engagement.status.value}: {engagement.engagement_score:.0f}%"
-                    output = draw_text_with_background(
-                        output, eng_label, (x, y + h + 20),
-                        color=(255, 255, 255), bg_color=status_color
-                    )
-        
+
+        # Remove tracked students that have left the camera view (>4.0s)
+        for sname in list(self.tracked_students.keys()):
+            if now - self._student_last_seen.get(sname, 0.0) > 4.0:
+                self.tracked_students.pop(sname, None)
+
         # Draw FPS
         fps = self.fps_counter.get_fps()
         cv2.putText(
             output, f"FPS: {fps:.1f}", (10, 30),
             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
         )
-        
-        # Draw attendance count
-        try:
-            active_sess = self.db_service.sessions.get_active_session()
-            active_sess_id = active_sess.session_id if active_sess else None
-            count = self.db_service.attendance.get_attendance_count(session_id=active_sess_id)
-            cv2.putText(
-                output, f"Present: {count}", (10, 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
-            )
-        except Exception as e:
-            logger.debug(f"Error drawing count: {e}")
-        
+
+        # Draw attendance count (cached every 2.0s)
+        if (now - self._last_count_check_time) > 2.0:
+            try:
+                self._cached_attendance_count = self.db_service.attendance.get_attendance_count(session_id=active_sess_id)
+                self._last_count_check_time = now
+            except Exception as e:
+                logger.debug(f"Error drawing count: {e}")
+
+        cv2.putText(
+            output, f"Present: {self._cached_attendance_count}", (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
+        )
+
         return output
     
     def get_processed_frame(self) -> np.ndarray:
@@ -381,11 +552,9 @@ class SystemState:
                 return self.current_frame.copy()
         return None
     
-    def _save_unknown_face(self, frame: np.ndarray, det: FaceDetection,
-                           track_key: str, similarity: float):
+    def _save_unknown_face(self, crop: np.ndarray, track_key: str, similarity: float):
         """
         Save a cropped unknown face to the review queue.
-
         Applies a per-track cooldown so one lingering stranger doesn't
         flood the queue with hundreds of near-identical crops.
         """
@@ -397,11 +566,7 @@ class SystemState:
             if last and (now - last).total_seconds() < config.unknown_queue.cooldown_seconds:
                 return
             
-            x, y, w, h = det.bbox
-            pad = int(min(w, h) * 0.2)
-            crop = frame[max(0, y - pad): y + h + pad,
-                         max(0, x - pad): x + w + pad]
-            if crop.size == 0:
+            if crop is None or crop.size == 0:
                 return
             
             out_dir = Path(config.unknown_queue.dir)
@@ -568,25 +733,30 @@ def api_stream_events():
     and attendee counts directly to connected clients without HTTP polling.
     """
     def event_stream():
+        last_db_time = 0.0
+        cached_active_sess = None
+        cached_present_count = 0
+        cached_avg_eng = 0.0
+        cached_total = 0
+        cached_absent = 0
+        cached_pct = 0.0
+
         while True:
             try:
-                active_sess = None
-                present_count = 0
-                avg_eng = 0.0
-                
-                if state.db_service:
-                    active_sess = state.db_service.sessions.get_active_session()
-                    active_sess_id = active_sess.session_id if active_sess else None
-                    present_count = state.db_service.attendance.get_attendance_count(session_id=active_sess_id)
-                    avg_eng = state.db_service.attendance.get_average_engagement(session_id=active_sess_id)
-                    total_students = state.db_service.students.get_student_count()
-                    absent_count = max(0, total_students - present_count)
-                    attendance_pct = (present_count / total_students * 100) if total_students > 0 else 0.0
-                else:
-                    total_students = 0
-                    absent_count = 0
-                    attendance_pct = 0.0
-                
+                now_t = time.time()
+                if (now_t - last_db_time) > 1.5 and state.db_service:
+                    try:
+                        cached_active_sess = state.db_service.sessions.get_active_session()
+                        sess_id = cached_active_sess.session_id if cached_active_sess else None
+                        cached_present_count = state.db_service.attendance.get_attendance_count(session_id=sess_id)
+                        cached_avg_eng = state.db_service.attendance.get_average_engagement(session_id=sess_id)
+                        cached_total = state.db_service.students.get_student_count()
+                        cached_absent = max(0, cached_total - cached_present_count)
+                        cached_pct = (cached_present_count / cached_total * 100) if cached_total > 0 else 0.0
+                        last_db_time = now_t
+                    except Exception as e:
+                        logger.debug(f"SSE DB query error: {e}")
+
                 tracked = {}
                 for name, metrics in list(state.tracked_students.items()):
                     tracked[name] = metrics.to_dict()
@@ -594,13 +764,13 @@ def api_stream_events():
                 payload = {
                     'is_running': state.is_running,
                     'fps': round(state.fps_counter.get_fps(), 1),
-                    'active_session': active_sess.to_dict() if active_sess else None,
-                    'active_session_id': active_sess.session_id if active_sess else None,
-                    'present_count': present_count,
-                    'total_students': total_students,
-                    'absent_count': absent_count,
-                    'attendance_percentage': round(attendance_pct, 1),
-                    'average_engagement': round(avg_eng, 1),
+                    'active_session': cached_active_sess.to_dict() if cached_active_sess else None,
+                    'active_session_id': cached_active_sess.session_id if cached_active_sess else None,
+                    'present_count': cached_present_count,
+                    'total_students': cached_total,
+                    'absent_count': cached_absent,
+                    'attendance_percentage': round(cached_pct, 1),
+                    'average_engagement': round(cached_avg_eng, 1),
                     'tracked_students': tracked,
                     'timestamp': datetime.now().isoformat()
                 }
@@ -611,7 +781,7 @@ def api_stream_events():
             except Exception as e:
                 logger.debug(f"SSE stream error: {e}")
                 
-            time.sleep(0.3)  # ~3.3 updates per second
+            time.sleep(0.5)
 
     return Response(
         event_stream(),
@@ -1059,19 +1229,188 @@ def api_batch_attendance():
         return jsonify({'error': str(e)}), 500
 
 
+# In-memory cache for unknown face embeddings: filename -> (mtime, embedding_vector)
+_unknown_face_embeddings_cache: Dict[str, Tuple[float, Optional[np.ndarray]]] = {}
+
+
+def _cluster_unknown_faces(similarity_threshold: float = 0.58):
+    """
+    Cluster unknown face images by embedding cosine similarity.
+    Returns:
+        tuple: (clusters, unclustered_entries)
+    """
+    out_dir = Path(config.unknown_queue.dir)
+    if not out_dir.exists():
+        return [], []
+
+    files = sorted(out_dir.glob("*.jpg"), key=lambda f: f.stat().st_mtime, reverse=True)
+    if not files:
+        return [], []
+
+    if not state.recognizer:
+        state.initialize()
+
+    encoder = state.recognizer.encoder
+
+    embeddings = []
+    valid_entries = []
+    unclassified_entries = []
+
+    for f in files:
+        mtime = f.stat().st_mtime
+        entry = {
+            'filename': f.name,
+            'url': f'/unknown/{f.name}',
+            'created': datetime.fromtimestamp(mtime).isoformat()
+        }
+
+        # Check cache
+        cached = _unknown_face_embeddings_cache.get(f.name)
+        if cached and cached[0] == mtime:
+            emb = cached[1]
+        else:
+            try:
+                img = cv2.imread(str(f))
+                if img is not None:
+                    encs = encoder.encode_face(img)
+                    emb = encs[0] if encs else None
+                else:
+                    emb = None
+            except Exception as e:
+                logger.debug(f"Failed to encode {f.name}: {e}")
+                emb = None
+            _unknown_face_embeddings_cache[f.name] = (mtime, emb)
+
+        if emb is not None:
+            embeddings.append(emb)
+            valid_entries.append(entry)
+        else:
+            unclassified_entries.append(entry)
+
+    if not embeddings:
+        if unclassified_entries:
+            return [{
+                'cluster_id': 'cluster_unclassified',
+                'representative': unclassified_entries[0]['filename'],
+                'representative_url': unclassified_entries[0]['url'],
+                'count': len(unclassified_entries),
+                'faces': unclassified_entries,
+                'is_unclassified': True
+            }], unclassified_entries
+        return [], []
+
+    # Compute cosine similarity matrix
+    M = np.array(embeddings)
+    norms = np.linalg.norm(M, axis=1, keepdims=True) + 1e-10
+    M_norm = M / norms
+    sim_matrix = M_norm @ M_norm.T
+
+    visited = set()
+    clusters = []
+
+    for i in range(len(valid_entries)):
+        if i in visited:
+            continue
+        cluster_indices = [i]
+        visited.add(i)
+        for j in range(i + 1, len(valid_entries)):
+            if j not in visited and sim_matrix[i, j] >= similarity_threshold:
+                cluster_indices.append(j)
+                visited.add(j)
+
+        cluster_faces = [valid_entries[idx] for idx in cluster_indices]
+        cluster_id = f"cluster_{len(clusters) + 1}"
+        for cf in cluster_faces:
+            cf['cluster_id'] = cluster_id
+
+        clusters.append({
+            'cluster_id': cluster_id,
+            'representative': cluster_faces[0]['filename'],
+            'representative_url': cluster_faces[0]['url'],
+            'count': len(cluster_faces),
+            'faces': cluster_faces
+        })
+
+    # Add unclassified / low quality crops as an extra cluster if any
+    if unclassified_entries:
+        for uf in unclassified_entries:
+            uf['cluster_id'] = 'cluster_misc'
+        clusters.append({
+            'cluster_id': 'cluster_misc',
+            'representative': unclassified_entries[0]['filename'],
+            'representative_url': unclassified_entries[0]['url'],
+            'count': len(unclassified_entries),
+            'faces': unclassified_entries,
+            'is_unclassified': True
+        })
+
+    clusters.sort(key=lambda c: c['count'], reverse=True)
+    return clusters, unclassified_entries
+
+
 @app.route('/api/unknown-faces', methods=['GET'])
 def api_unknown_faces():
-    """List unknown faces saved in the review queue."""
+    """List unknown faces saved in the review queue, optionally clustered."""
     out_dir = Path(config.unknown_queue.dir)
     entries = []
     if out_dir.exists():
-        for f in sorted(out_dir.glob("*.jpg"), reverse=True):
+        for f in sorted(out_dir.glob("*.jpg"), key=lambda x: x.stat().st_mtime, reverse=True):
             entries.append({
                 'filename': f.name,
                 'url': f'/unknown/{f.name}',
                 'created': datetime.fromtimestamp(f.stat().st_mtime).isoformat()
             })
-    return jsonify({'unknown_faces': entries, 'count': len(entries)})
+
+    clusters = []
+    if request.args.get('cluster') == 'true' and entries:
+        try:
+            clusters, _ = _cluster_unknown_faces()
+            cluster_map = {}
+            for c in clusters:
+                for fc in c.get('faces', []):
+                    cluster_map[fc['filename']] = c['cluster_id']
+            for e in entries:
+                e['cluster_id'] = cluster_map.get(e['filename'])
+        except Exception as e:
+            logger.error(f"Clusterify on get failed: {e}")
+
+    return jsonify({'unknown_faces': entries, 'count': len(entries), 'clusters': clusters})
+
+
+@app.route('/api/unknown-faces/clusterify', methods=['POST'])
+def api_clusterify_unknown():
+    """Cluster all pending unknown faces by facial similarity."""
+    try:
+        clusters, unclassified = _cluster_unknown_faces()
+        out_dir = Path(config.unknown_queue.dir)
+        total_count = len(list(out_dir.glob("*.jpg"))) if out_dir.exists() else 0
+        return jsonify({
+            'status': 'success',
+            'count': total_count,
+            'clusters': clusters,
+            'unclassified_count': len(unclassified)
+        })
+    except Exception as e:
+        logger.error(f"Clusterify failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/unknown-faces/clear', methods=['POST', 'DELETE'])
+@app.route('/api/unknown-faces', methods=['DELETE'])
+def api_clear_unknown_queue():
+    """Purge all unknown face captures from the review queue."""
+    out_dir = Path(config.unknown_queue.dir)
+    cleared = 0
+    if out_dir.exists():
+        for f in out_dir.glob("*.jpg"):
+            try:
+                f.unlink()
+                cleared += 1
+            except Exception:
+                pass
+    _unknown_face_embeddings_cache.clear()
+    logger.info(f"Cleared {cleared} images from unknown faces review queue")
+    return jsonify({'status': 'success', 'cleared': cleared})
 
 
 @app.route('/unknown/<path:filename>')
@@ -1082,37 +1421,88 @@ def unknown_face_image(filename):
 
 
 @app.route('/api/unknown-faces/register', methods=['POST'])
+@app.route('/api/unknown-faces/register-cluster', methods=['POST'])
 def api_register_unknown():
     """
-    Register an unknown face crop as a new student.
-    Copies the crop into the dataset and adds its encoding.
+    Register one or more unknown face crops as an enrolled student.
+    Saves approved images to dataset/<name>/, creates Student record in DB,
+    encodes faces into live recognizer, and removes them from the queue.
     """
     data = request.json
-    if not data or 'filename' not in data or 'name' not in data:
-        return jsonify({'error': 'filename and name are required'}), 400
+    if not data or 'name' not in data or not data.get('name', '').strip():
+        return jsonify({'error': 'Student name is required'}), 400
     
+    filenames = data.get('filenames')
+    if not filenames and 'filename' in data:
+        filenames = [data['filename']]
+    
+    if not filenames:
+        return jsonify({'error': 'At least one face image filename is required'}), 400
+
+    name = data['name'].strip()
+    student_id = data.get('student_id', '').strip() or f"STU_{name.upper().replace(' ', '_')}"
+    department = data.get('department', 'Computer Science').strip()
+    email = data.get('email', '').strip() or None
+
+    if not state.db_service:
+        state.initialize()
+
+    out_dir = Path(config.unknown_queue.dir)
+    student_dir = Path(config.recognition.dataset_path) / name
+    student_dir.mkdir(parents=True, exist_ok=True)
+
+    loaded_images = []
+    saved_paths = []
+    files_to_unlink = []
+
     try:
-        src = Path(config.unknown_queue.dir) / data['filename']
-        if not src.exists():
-            return jsonify({'error': 'File not found'}), 404
-        
-        name = data['name'].strip()
-        student_dir = Path(config.recognition.dataset_path) / name
-        student_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Copy into dataset (kept for future re-encoding)
-        dst = student_dir / f"unknown_{src.stem}.jpg"
-        shutil.copy2(str(src), str(dst))
-        
-        # Encode this face and add to the live recognizer
-        image = cv2.imread(str(dst))
-        ok = state.recognizer.add_new_student(name, [image]) if image is not None else False
-        
-        if ok:
-            src.unlink()  # remove from queue
-            return jsonify({'status': 'success', 'message': f'Registered {name}'})
-        return jsonify({'error': 'No face found in crop'}), 400
-        
+        # 1. Add student to database
+        student = Student(
+            student_id=student_id,
+            name=name,
+            email=email,
+            department=department
+        )
+        try:
+            state.db_service.students.add_student(student)
+        except Exception as e:
+            logger.warning(f"DB add_student: {e}")
+
+        # 2. Process all specified filenames
+        for fn in filenames:
+            src = out_dir / fn
+            if src.exists():
+                dst = student_dir / f"cluster_{src.name}"
+                shutil.copy2(str(src), str(dst))
+                saved_paths.append(dst)
+                files_to_unlink.append(src)
+                
+                img = cv2.imread(str(dst))
+                if img is not None:
+                    loaded_images.append(img)
+
+        if not loaded_images:
+            return jsonify({'error': 'No readable images found from selected filenames'}), 400
+
+        # 3. Add to live recognizer (immediate encoding)
+        ok = state.recognizer.add_new_student(name, loaded_images) if state.recognizer else False
+
+        # 4. Remove successfully registered files from unknown queue
+        for f in files_to_unlink:
+            try:
+                f.unlink()
+                _unknown_face_embeddings_cache.pop(f.name, None)
+            except Exception:
+                pass
+
+        logger.info(f"Registered {name} ({student_id}) with {len(loaded_images)} images (encoded: {ok})")
+        return jsonify({
+            'status': 'success',
+            'message': f"Registered {name} with {len(loaded_images)} photos!",
+            'encoded': ok,
+            'count': len(loaded_images)
+        })
+
     except Exception as e:
         logger.error(f"Register unknown failed: {e}")
         return jsonify({'error': str(e)}), 500
@@ -1120,18 +1510,31 @@ def api_register_unknown():
 
 @app.route('/api/unknown-faces/ignore', methods=['POST'])
 def api_ignore_unknown():
-    """Remove an unknown-face crop from the review queue."""
+    """Remove one or more unknown-face crops from the review queue."""
     data = request.json
-    if not data or 'filename' not in data:
-        return jsonify({'error': 'filename is required'}), 400
-    
-    try:
-        src = Path(config.unknown_queue.dir) / data['filename']
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    filenames = data.get('filenames')
+    if not filenames and 'filename' in data:
+        filenames = [data['filename']]
+
+    if not filenames:
+        return jsonify({'error': 'filename or filenames required'}), 400
+
+    out_dir = Path(config.unknown_queue.dir)
+    removed = 0
+    for fn in filenames:
+        src = out_dir / fn
         if src.exists():
-            src.unlink()
-        return jsonify({'status': 'success'})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+            try:
+                src.unlink()
+                _unknown_face_embeddings_cache.pop(fn, None)
+                removed += 1
+            except Exception:
+                pass
+
+    return jsonify({'status': 'success', 'removed': removed})
 
 
 @app.route('/api/register-student', methods=['POST'])
@@ -1215,6 +1618,77 @@ def api_register_student():
     except Exception as e:
         logger.error(f"Registration failed: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/tuning', methods=['GET', 'POST'])
+def api_tuning():
+    """
+    Get or update detection & recognition tuning parameters at runtime.
+    Allows configuring the False-Positive Noise Filter (min_face_size),
+    detection confidence, recognition distance threshold, and caching TTL.
+    """
+    if request.method == 'GET':
+        return jsonify({
+            'success': True,
+            'min_face_size': getattr(config.detection, 'min_face_size', 55),
+            'min_detection_confidence': int(config.detection.min_detection_confidence * 100),
+            'recognition_threshold': int(config.recognition.recognition_threshold * 100),
+            'batch_size': getattr(config.recognition, 'batch_size', 4),
+            'cache_ttl_seconds': getattr(config.recognition, 'cache_ttl_seconds', 3.0),
+            'adaptive_skip_enabled': config.detection.adaptive_skip_enabled
+        })
+
+    data = request.get_json(silent=True) or {}
+    
+    if 'min_face_size' in data:
+        try:
+            val = int(data['min_face_size'])
+            if 10 <= val <= 400:
+                config.detection.min_face_size = val
+                logger.info(f"Updated False-Positive Noise Filter: min_face_size = {val}px")
+        except (ValueError, TypeError):
+            pass
+
+    if 'min_detection_confidence' in data:
+        try:
+            val = float(data['min_detection_confidence'])
+            conf = val / 100.0 if val > 1.0 else val
+            if 0.1 <= conf <= 0.99:
+                config.detection.min_detection_confidence = conf
+                if state.detector:
+                    state.detector.min_detection_confidence = conf
+                logger.info(f"Updated min_detection_confidence = {conf:.2f}")
+        except (ValueError, TypeError):
+            pass
+
+    if 'recognition_threshold' in data:
+        try:
+            val = float(data['recognition_threshold'])
+            thresh = val / 100.0 if val > 1.0 else val
+            if 0.1 <= thresh <= 1.0:
+                config.recognition.recognition_threshold = thresh
+                if state.recognizer:
+                    state.recognizer.recognition_threshold = thresh
+                logger.info(f"Updated recognition_threshold = {thresh:.2f}")
+        except (ValueError, TypeError):
+            pass
+
+    if 'cache_ttl_seconds' in data:
+        try:
+            val = float(data['cache_ttl_seconds'])
+            if 0.5 <= val <= 30.0:
+                config.recognition.cache_ttl_seconds = val
+        except (ValueError, TypeError):
+            pass
+
+    return jsonify({
+        'success': True,
+        'message': 'Tuning settings updated',
+        'min_face_size': config.detection.min_face_size,
+        'min_detection_confidence': int(config.detection.min_detection_confidence * 100),
+        'recognition_threshold': int(config.recognition.recognition_threshold * 100),
+        'cache_ttl_seconds': config.recognition.cache_ttl_seconds
+    })
 
 
 # ============================================================================

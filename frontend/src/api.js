@@ -151,21 +151,34 @@ export const api = {
   // Full Registration (Images + DB + Live Encodings)
   registerStudent: (payload) => request('/api/register-student', { method: 'POST', body: JSON.stringify(payload) }),
 
-  // Unknown Faces Review Queue
-  getUnknownFaces: () => request('/api/unknown-faces'),
-  registerUnknown: (filename, name) => request('/api/unknown-faces/register', { 
+  // Unknown Faces Review Queue & Clustering
+  getUnknownFaces: (cluster = false) => request(`/api/unknown-faces${cluster ? '?cluster=true' : ''}`),
+  clusterifyUnknownFaces: () => request('/api/unknown-faces/clusterify', { method: 'POST' }),
+  clearUnknownFaces: () => request('/api/unknown-faces/clear', { method: 'POST' }),
+  registerUnknown: (payload) => request('/api/unknown-faces/register', { 
     method: 'POST', 
-    body: JSON.stringify({ filename, name }) 
+    body: JSON.stringify(typeof payload === 'string' ? { filename: payload } : payload) 
   }),
-  ignoreUnknown: (filename) => request('/api/unknown-faces/ignore', { 
+  registerUnknownCluster: (payload) => request('/api/unknown-faces/register-cluster', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  }),
+  ignoreUnknown: (filenames) => request('/api/unknown-faces/ignore', { 
     method: 'POST', 
-    body: JSON.stringify({ filename }) 
+    body: JSON.stringify(Array.isArray(filenames) ? { filenames } : { filename: filenames }) 
   }),
 
   // Batch Multi-Image Attendance
   runBatchAttendance: (folder) => request('/api/batch-attendance', {
     method: 'POST',
     body: JSON.stringify({ folder })
+  }),
+
+  // Detection & Recognition Tuning
+  getTuning: () => request('/api/tuning'),
+  updateTuning: (tuningData) => request('/api/tuning', {
+    method: 'POST',
+    body: JSON.stringify(tuningData)
   }),
 };
 

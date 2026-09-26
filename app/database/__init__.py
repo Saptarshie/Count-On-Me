@@ -563,16 +563,21 @@ class StudentRepository:
         self.db = db_manager
     
     def add_student(self, student: Student) -> int:
-        """Add a new student."""
+        """Add a new student (upsert on student_id conflict)."""
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO students (student_id, name, email, department)
                 VALUES (?, ?, ?, ?)
+                ON CONFLICT(student_id) DO UPDATE SET
+                    name = excluded.name,
+                    email = COALESCE(excluded.email, students.email),
+                    department = COALESCE(excluded.department, students.department),
+                    is_active = 1
             ''', (student.student_id, student.name, student.email, student.department))
             conn.commit()
-            logger.info(f"Added student: {student.name}")
-            return cursor.lastrowid
+            logger.info(f"Added/updated student: {student.name} ({student.student_id})")
+            return cursor.lastrowid or 0
     
     def get_student(self, student_id: str) -> Optional[Student]:
         """Get student by ID."""

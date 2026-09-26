@@ -28,10 +28,10 @@ class DetectionConfig:
     
     # Processing settings
     max_faces: int = 20
-    frame_skip: int = 2  # Process every nth frame for performance
+    frame_skip: int = 1  # Process every frame since recognition is decoupled & async
     
-    # Adaptive frame skipping (FPS-based stride selection)
-    adaptive_skip_enabled: bool = True
+    # Adaptive frame skipping (relieves CPU if FPS drops below threshold)
+    adaptive_skip_enabled: bool = False
     adaptive_high_fps: float = 20.0   # above this -> process every 3rd frame
     adaptive_low_fps: float = 10.0    # below this -> process every frame
     stride_high: int = 3
@@ -40,6 +40,9 @@ class DetectionConfig:
     
     # Bounding box expansion factor
     bbox_expansion: float = 0.1
+    
+    # False-positive noise filter: ignore detections smaller than this width/height (px)
+    min_face_size: int = 55
 
 
 @dataclass
@@ -77,12 +80,15 @@ class RecognitionConfig:
     """Configuration for face recognition module."""
     
     # Recognition thresholds
-    recognition_threshold: float = 0.6  # Euclidean distance threshold
+    recognition_threshold: float = 0.6  # Distance threshold
     unknown_threshold: float = 0.5  # Below this, face is unknown
     
-    # Encoding settings
+    # Encoding & Batching settings
     encoding_model: str = "large"  # 'small' or 'large'
     num_jitters: int = 1  # Higher = more accurate but slower
+    batch_size: int = 4  # Max faces batched together in one forward pass
+    cache_ttl_seconds: float = 3.0  # Seconds to trust recognized identity for a track
+    detector_backend: str = "skip"  # Skip redundant detection on already cropped faces
     
     # Paths
     encodings_path: Path = BASE_DIR / "models" / "encodings.pkl"

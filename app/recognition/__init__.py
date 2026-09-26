@@ -117,18 +117,19 @@ class FaceEncoder:
         
         model_key = model or config.recognition.encoding_model
         self.model_name = self.MODEL_MAP.get(model_key, 'VGG-Face')
-        self.detector_backend = 'opencv'  # Fast and reliable
+        self.detector_backend = getattr(config.recognition, 'detector_backend', 'skip')
         self._model = None
+        self._model_client = None
         
-        logger.info(f"FaceEncoder initialized with model={self.model_name}")
+        logger.info(f"FaceEncoder initialized with model={self.model_name}, detector_backend={self.detector_backend}")
     
     def _ensure_model_loaded(self):
         """Lazy load the model on first use."""
-        if self._model is None:
+        if self._model is None or self._model_client is None:
             # Warm up the model by running a dummy encoding
             logger.info(f"Loading {self.model_name} model (first use)...")
             try:
-                # Create a dummy image to initialize
+                self._model_client = DeepFace.build_model(self.model_name)
                 dummy = np.zeros((224, 224, 3), dtype=np.uint8)
                 dummy[50:200, 50:200] = 128  # Gray region
                 DeepFace.represent(
@@ -188,6 +189,65 @@ class FaceEncoder:
         except Exception as e:
             logger.debug(f"Error encoding face: {e}")
             return []
+    
+    def encode_faces_batch(self, images: List[np.ndarray]) -> List[Optional[np.ndarray]]:
+        """
+        Encode multiple face crops in a single batched tensor forward pass.
+        
+        Args:
+            images: List of BGR face crop numpy arrays
+            
+        Returns:
+            List of 1D numpy embeddings (or None for failed/empty crops)
+        """
+        if not images:
+            return []
+            
+        self._ensure_model_loaded()
+        
+        # Fast path for 1 image
+        if len(images) == 1:
+            enc = self.encode_face(images[0])
+            return [enc[0] if enc else None]
+            
+        try:
+            preprocessed = []
+            valid_indices = []
+            
+            for i, img in enumerate(images):
+                if img is None or img.size == 0:
+                    continue
+                resized = cv2.resize(img, (224, 224))
+                img_f = resized.astype(np.float32)
+                # VGG-Face standard channel mean subtraction
+                img_f[..., 0] -= 93.5940
+                img_f[..., 1] -= 104.7624
+                img_f[..., 2] -= 129.1863
+                preprocessed.append(img_f)
+                valid_indices.append(i)
+                
+            if not preprocessed:
+                return [None] * len(images)
+                
+            batch_tensor = np.array(preprocessed, dtype=np.float32)
+            
+            if self._model_client is None:
+                self._model_client = DeepFace.build_model(self.model_name)
+                
+            preds = self._model_client.model.predict(
+                batch_tensor,
+                batch_size=len(batch_tensor),
+                verbose=0
+            )
+            
+            results: List[Optional[np.ndarray]] = [None] * len(images)
+            for row_idx, orig_idx in enumerate(valid_indices):
+                results[orig_idx] = preds[row_idx]
+                
+            return results
+        except Exception as e:
+            logger.warning(f"Batch predict fallback: {e}")
+            return [self.encode_face(img)[0] if self.encode_face(img) else None for img in images]
     
     def encode_from_file(self, image_path: str) -> List[np.ndarray]:
         """
@@ -420,6 +480,7 @@ class FaceRecognizer:
         # Known encodings
         self.known_names: List[str] = []
         self.known_encodings: List[np.ndarray] = []
+        self._known_matrix_norm: Optional[np.ndarray] = None
         self.name_to_student: Dict[str, StudentEncoding] = {}
         
         # Attendance tracking for duplicate prevention
@@ -431,7 +492,7 @@ class FaceRecognizer:
         logger.info(f"FaceRecognizer initialized with {len(self.known_names)} known faces")
     
     def _load_known_faces(self):
-        """Load known face encodings from file."""
+        """Load known face encodings from file and pre-normalize."""
         if self.dataset_encoder.load_encodings():
             self.known_names = []
             self.known_encodings = []
@@ -442,119 +503,115 @@ class FaceRecognizer:
                     self.known_names.append(student_enc.name)
                     self.known_encodings.append(encoding)
                 self.name_to_student[student_enc.name] = student_enc
+            
+            if self.known_encodings:
+                K = np.array(self.known_encodings, dtype=np.float32)
+                self._known_matrix_norm = K / (np.linalg.norm(K, axis=1, keepdims=True) + 1e-10)
+            else:
+                self._known_matrix_norm = None
     
     def reload_encodings(self):
         """Reload encodings from file."""
         self._load_known_faces()
         logger.info(f"Reloaded {len(self.known_names)} known faces")
     
+    def recognize_batch(
+        self,
+        face_images: List[np.ndarray]
+    ) -> List[RecognitionResult]:
+        """
+        Recognize multiple face crops in a single batched tensor forward pass.
+        
+        Args:
+            face_images: List of face crops as numpy arrays
+            
+        Returns:
+            List of RecognitionResult objects
+        """
+        if not face_images:
+            return []
+            
+        if not self.known_encodings:
+            return [
+                RecognitionResult(name="Unknown", confidence=0.0, distance=1.0, is_known=False)
+                for _ in face_images
+            ]
+            
+        # Ensure known encodings matrix is built and matches count
+        if self._known_matrix_norm is None or len(self._known_matrix_norm) != len(self.known_encodings):
+            K = np.array(self.known_encodings, dtype=np.float32)
+            self._known_matrix_norm = K / (np.linalg.norm(K, axis=1, keepdims=True) + 1e-10)
+            
+        encodings = self.encoder.encode_faces_batch(face_images)
+        results: List[RecognitionResult] = []
+        
+        for i, enc in enumerate(encodings):
+            if enc is None or len(enc) == 0:
+                results.append(RecognitionResult(
+                    name="Unknown", confidence=0.0, distance=1.0, is_known=False
+                ))
+                continue
+                
+            norm_enc = enc / (np.linalg.norm(enc) + 1e-10)
+            sims = np.dot(self._known_matrix_norm, norm_enc)
+            
+            if len(sims) == 0:
+                results.append(RecognitionResult(
+                    name="Unknown", confidence=0.0, distance=1.0, is_known=False
+                ))
+                continue
+                
+            best_idx = int(np.argmax(sims))
+            best_similarity = float(sims[best_idx])
+            best_name = self.known_names[best_idx]
+            best_distance = 1.0 - best_similarity
+            
+            if best_similarity >= (1.0 - self.threshold):
+                results.append(RecognitionResult(
+                    name=best_name,
+                    confidence=best_similarity,
+                    distance=best_distance,
+                    encoding=enc,
+                    is_known=True
+                ))
+            else:
+                results.append(RecognitionResult(
+                    name="Unknown",
+                    confidence=best_similarity,
+                    distance=best_distance,
+                    encoding=enc,
+                    is_known=False
+                ))
+                
+        return results
+
     def recognize(
         self,
         face_image: np.ndarray,
         face_location: Tuple = None
     ) -> RecognitionResult:
         """
-        Recognize a face from an image.
-        
-        Args:
-            face_image: Face image as numpy array
-            face_location: Optional face location tuple
-        
-        Returns:
-            RecognitionResult object
+        Recognize a single face crop (calls recognize_batch with 1 item).
         """
-        if not self.known_encodings:
-            logger.warning("No known encodings loaded")
-            return RecognitionResult(
-                name="Unknown",
-                confidence=0.0,
-                distance=1.0,
-                is_known=False
-            )
-        
-        try:
-            # Get face encoding
-            encodings = self.encoder.encode_face(face_image)
-            
-            if not encodings:
-                return RecognitionResult(
-                    name="Unknown",
-                    confidence=0.0,
-                    distance=1.0,
-                    is_known=False
-                )
-            
-            face_encoding = encodings[0]
-            
-            # Compare using cosine similarity
-            similarities = self._compute_similarities(face_encoding)
-            
-            if len(similarities) == 0:
-                return RecognitionResult(
-                    name="Unknown",
-                    confidence=0.0,
-                    distance=1.0,
-                    is_known=False
-                )
-            
-            # Find best match (highest similarity)
-            best_idx = np.argmax(similarities)
-            best_similarity = similarities[best_idx]
-            best_name = self.known_names[best_idx]
-            best_distance = 1.0 - best_similarity
-            
-            # Check if match is confident enough
-            if best_similarity >= (1.0 - self.threshold):
-                return RecognitionResult(
-                    name=best_name,
-                    confidence=best_similarity,
-                    distance=best_distance,
-                    encoding=face_encoding,
-                    is_known=True
-                )
-            else:
-                return RecognitionResult(
-                    name="Unknown",
-                    confidence=best_similarity,
-                    distance=best_distance,
-                    encoding=face_encoding,
-                    is_known=False
-                )
-                
-        except Exception as e:
-            logger.error(f"Error during recognition: {e}")
-            return RecognitionResult(
-                name="Unknown",
-                confidence=0.0,
-                distance=1.0,
-                is_known=False
-            )
+        batch_res = self.recognize_batch([face_image])
+        return batch_res[0] if batch_res else RecognitionResult(
+            name="Unknown", confidence=0.0, distance=1.0, is_known=False
+        )
     
     def _compute_similarities(self, encoding: np.ndarray) -> np.ndarray:
         """
         Compute cosine similarities between encoding and all known encodings.
-        
-        Args:
-            encoding: Face encoding to compare
-        
-        Returns:
-            Array of similarity scores (0-1, higher is more similar)
+        Uses vectorized BLAS matrix multiplication for extreme speed.
         """
         if not self.known_encodings:
             return np.array([])
         
-        # Normalize the query encoding
+        if self._known_matrix_norm is None or len(self._known_matrix_norm) != len(self.known_encodings):
+            K = np.array(self.known_encodings, dtype=np.float32)
+            self._known_matrix_norm = K / (np.linalg.norm(K, axis=1, keepdims=True) + 1e-10)
+        
         norm_encoding = encoding / (np.linalg.norm(encoding) + 1e-10)
-        
-        similarities = []
-        for known_enc in self.known_encodings:
-            # Normalize known encoding
-            norm_known = known_enc / (np.linalg.norm(known_enc) + 1e-10)
-            # Cosine similarity
-            sim = np.dot(norm_encoding, norm_known)
-            similarities.append(sim)
-        
-        return np.array(similarities)
+        return np.dot(self._known_matrix_norm, norm_encoding)
     
     def recognize_multiple(
         self,

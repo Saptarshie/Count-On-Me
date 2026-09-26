@@ -27,13 +27,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from config import config
 
-# Try to import MediaPipe (may not have solutions in newer versions)
+# MediaPipe
 MEDIAPIPE_AVAILABLE = False
 mp = None
 try:
     import mediapipe as mp
-    if hasattr(mp, 'solutions') and hasattr(mp.solutions, 'face_detection'):
-        MEDIAPIPE_AVAILABLE = True
+    MEDIAPIPE_AVAILABLE = True
 except ImportError:
     pass
 
@@ -129,23 +128,48 @@ class FaceDetector:
         
         # Try MediaPipe first, fall back to OpenCV
         self.use_mediapipe = False
+        self._task_detector = None
         self._detector = None
         self.mp_face_detection = None
         self.mp_drawing = None
         self._face_cascade = None
         
-        if MEDIAPIPE_AVAILABLE:
+        # 1. Try MediaPipe Tasks BlazeFace (ultra-fast, ~5ms)
+        task_model = Path(__file__).parent.parent.parent / "models" / "blaze_face_short_range.tflite"
+        if task_model.exists():
             try:
-                self.mp_face_detection = mp.solutions.face_detection
-                self.mp_drawing = mp.solutions.drawing_utils
-                self._detector = self.mp_face_detection.FaceDetection(
-                    min_detection_confidence=self.min_detection_confidence,
-                    model_selection=self.model_selection
+                from mediapipe.tasks import python as mp_python
+                from mediapipe.tasks.python import vision as mp_vision
+                base_options = mp_python.BaseOptions(model_asset_path=str(task_model))
+                options = mp_vision.FaceDetectorOptions(
+                    base_options=base_options,
+                    min_detection_confidence=self.min_detection_confidence
                 )
+                if hasattr(mp_vision, 'FaceDetector'):
+                    try:
+                        mp_vision.FaceDetector.__del__ = lambda self: None
+                    except Exception:
+                        pass
+                self._task_detector = mp_vision.FaceDetector.create_from_options(options)
                 self.use_mediapipe = True
-                logger.info("Using MediaPipe for face detection")
+                logger.info("Using MediaPipe Tasks BlazeFace for face detection (5ms)")
             except Exception as e:
-                logger.warning(f"MediaPipe init failed: {e}")
+                logger.warning(f"MediaPipe Tasks BlazeFace init failed: {e}")
+
+        # 2. Try legacy MediaPipe solutions if task model not available
+        if not self.use_mediapipe and MEDIAPIPE_AVAILABLE:
+            if hasattr(mp, 'solutions') and hasattr(mp.solutions, 'face_detection'):
+                try:
+                    self.mp_face_detection = mp.solutions.face_detection
+                    self.mp_drawing = mp.solutions.drawing_utils
+                    self._detector = self.mp_face_detection.FaceDetection(
+                        min_detection_confidence=self.min_detection_confidence,
+                        model_selection=self.model_selection
+                    )
+                    self.use_mediapipe = True
+                    logger.info("Using MediaPipe solutions for face detection")
+                except Exception as e:
+                    logger.warning(f"MediaPipe init failed: {e}")
         
         if not self.use_mediapipe:
             # Fall back to OpenCV Haar Cascade
@@ -190,8 +214,35 @@ class FaceDetector:
             height, width = frame.shape[:2]
             detections = []
             
-            if self.use_mediapipe and self._detector is not None:
-                # Use MediaPipe
+            min_size = getattr(config.detection, 'min_face_size', 55)
+
+            if self._task_detector is not None:
+                # Fast MediaPipe Tasks BlazeFace
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+                results = self._task_detector.detect(mp_img)
+                
+                if results.detections:
+                    for idx, det in enumerate(results.detections[:self.max_faces]):
+                        bbox = det.bounding_box
+                        x = max(0, int(bbox.origin_x))
+                        y = max(0, int(bbox.origin_y))
+                        w = min(int(bbox.width), width - x)
+                        h = min(int(bbox.height), height - y)
+                        
+                        # False-positive noise filter
+                        if w < min_size or h < min_size:
+                            continue
+                            
+                        conf = float(det.categories[0].score) if det.categories else 0.9
+                        face_det = FaceDetection(
+                            bbox=(x, y, w, h),
+                            confidence=conf,
+                            face_id=idx
+                        )
+                        detections.append(face_det)
+            elif self.use_mediapipe and self._detector is not None:
+                # Use Legacy MediaPipe
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 results = self._detector.process(rgb_frame)
                 
@@ -208,6 +259,10 @@ class FaceDetector:
                         y = max(0, y)
                         w = min(w, width - x)
                         h = min(h, height - y)
+                        
+                        # False-positive noise filter
+                        if w < min_size or h < min_size:
+                            continue
                         
                         confidence = detection.score[0]
                         landmarks = self._extract_landmarks(detection, width, height)
@@ -226,10 +281,12 @@ class FaceDetector:
                     gray,
                     scaleFactor=1.1,
                     minNeighbors=5,
-                    minSize=(30, 30)
+                    minSize=(min_size, min_size)
                 )
                 
                 for idx, (x, y, w, h) in enumerate(faces[:self.max_faces]):
+                    if w < min_size or h < min_size:
+                        continue
                     # Haar Cascade doesn't give confidence, use threshold
                     confidence = 0.9 if w > 50 and h > 50 else 0.7
                     

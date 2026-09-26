@@ -27,7 +27,34 @@ export default function LiveFeedView({ stats, setActiveTab, onRefresh }) {
   // Local toggles
   const [detectionConf, setDetectionConf] = useState(50);
   const [recognitionThresh, setRecognitionThresh] = useState(60);
+  const [minFaceSize, setMinFaceSize] = useState(55);
   const [autoAttendance, setAutoAttendance] = useState(true);
+
+  // Load active tuning settings from server
+  useEffect(() => {
+    api.getTuning().then(res => {
+      if (res?.success) {
+        if (res.min_face_size) setMinFaceSize(res.min_face_size);
+        if (res.min_detection_confidence) setDetectionConf(res.min_detection_confidence);
+        if (res.recognition_threshold) setRecognitionThresh(res.recognition_threshold);
+      }
+    }).catch(() => {});
+  }, []);
+
+  const handleMinFaceSizeChange = (val) => {
+    setMinFaceSize(val);
+    api.updateTuning({ min_face_size: val }).catch(() => {});
+  };
+
+  const handleDetectionConfChange = (val) => {
+    setDetectionConf(val);
+    api.updateTuning({ min_detection_confidence: val }).catch(() => {});
+  };
+
+  const handleRecognitionThreshChange = (val) => {
+    setRecognitionThresh(val);
+    api.updateTuning({ recognition_threshold: val }).catch(() => {});
+  };
 
   const videoContainerRef = useRef(null);
 
@@ -41,7 +68,7 @@ export default function LiveFeedView({ stats, setActiveTab, onRefresh }) {
 
   // Real-time tracking from SSE stream passed via stats props
   useEffect(() => {
-    if (stats?.tracked_students && typeof stats.tracked_students === 'object') {
+    if (stats?.tracked_students && typeof stats.tracked_students === 'object' && Object.keys(stats.tracked_students).length > 0) {
       setTrackedStudents(stats.tracked_students);
 
       Object.entries(stats.tracked_students).forEach(([name, data]) => {
@@ -69,23 +96,21 @@ export default function LiveFeedView({ stats, setActiveTab, onRefresh }) {
     }
   }, [stats?.tracked_students]);
 
-  // Fallback slow poll if SSE is not active
+  // Fast poll for real-time engagement data
   useEffect(() => {
     const interval = setInterval(async () => {
-      if (!stats?.tracked_students || Object.keys(stats.tracked_students).length === 0) {
-        try {
-          const engData = await api.getEngagement();
-          if (engData && Object.keys(engData).length > 0) {
-            setTrackedStudents(engData);
-          }
-        } catch (e) {
-          // silent fallback
+      try {
+        const engData = await api.getEngagement();
+        if (engData && typeof engData === 'object' && Object.keys(engData).length > 0) {
+          setTrackedStudents(engData);
         }
+      } catch (e) {
+        // silent fallback
       }
-    }, 5000);
+    }, 1000);
 
     return () => clearInterval(interval);
-  }, [stats?.tracked_students]);
+  }, []);
 
   const handleImageError = () => {
     // If the system is running, the devtunnel/network dropped a packet
@@ -478,6 +503,23 @@ export default function LiveFeedView({ stats, setActiveTab, onRefresh }) {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '20px' }}>
           <div>
             <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '8px' }}>
+              False-Positive Noise Filter: <strong style={{ color: '#06b6d4' }}>{minFaceSize}px</strong>
+            </label>
+            <input
+              type="range"
+              min="20"
+              max="160"
+              value={minFaceSize}
+              onChange={(e) => handleMinFaceSizeChange(Number(e.target.value))}
+              style={{ width: '100%', accentColor: 'var(--primary)' }}
+            />
+            <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
+              Ignores background artifacts smaller than {minFaceSize}×{minFaceSize}px
+            </span>
+          </div>
+
+          <div>
+            <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '8px' }}>
               Detection Confidence: {detectionConf}%
             </label>
             <input
@@ -485,7 +527,7 @@ export default function LiveFeedView({ stats, setActiveTab, onRefresh }) {
               min="10"
               max="95"
               value={detectionConf}
-              onChange={(e) => setDetectionConf(Number(e.target.value))}
+              onChange={(e) => handleDetectionConfChange(Number(e.target.value))}
               style={{ width: '100%', accentColor: 'var(--primary)' }}
             />
             <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
@@ -502,7 +544,7 @@ export default function LiveFeedView({ stats, setActiveTab, onRefresh }) {
               min="30"
               max="90"
               value={recognitionThresh}
-              onChange={(e) => setRecognitionThresh(Number(e.target.value))}
+              onChange={(e) => handleRecognitionThreshChange(Number(e.target.value))}
               style={{ width: '100%', accentColor: 'var(--primary)' }}
             />
             <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
