@@ -20,7 +20,7 @@ Version: 1.0.0
 import cv2
 import numpy as np
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Any
 from enum import Enum
 from collections import deque
 from datetime import datetime, timedelta
@@ -600,8 +600,8 @@ class EngagementTracker:
         """
         self.analyzer = FaceMeshAnalyzer(max_faces=config.detection.max_faces)
         
-        # Per-face tracking data
-        self._face_data: Dict[int, Dict] = {}
+        # Per-face tracking data (keyed by persistent track_id or face index)
+        self._face_data: Dict[Any, Dict] = {}
         self.history_size = history_size
         
         # Weights from config
@@ -611,30 +611,60 @@ class EngagementTracker:
         
         logger.info("EngagementTracker initialized")
     
-    def _get_or_create_face_data(self, face_id: int) -> Dict:
-        """Get or create tracking data for a face."""
+    def _get_or_create_face_data(self, face_id: Any) -> Dict:
+        """Get or create tracking data for a face by persistent track ID or index."""
+        now = datetime.now()
         if face_id not in self._face_data:
             self._face_data[face_id] = {
                 'ear_history': deque(maxlen=self.history_size),
                 'blink_times': deque(maxlen=60),  # Track last 60 blinks
                 'eyes_closed_frames': 0,
                 'last_ear': 0.30,
-                'created_at': datetime.now(),
+                'created_at': now,
+                'last_seen': now,
                 'engagement_history': deque(maxlen=self.history_size),
                 'head_pose_history': deque(maxlen=self.history_size)
             }
+        else:
+            self._face_data[face_id]['last_seen'] = now
         return self._face_data[face_id]
     
-    def track(self, frame: np.ndarray, detections: Optional[List] = None) -> List[Tuple[int, EngagementMetrics]]:
+    def prune_stale_tracks(self, active_track_ids: Optional[List[Any]] = None, max_age_seconds: float = 4.0):
         """
-        Track engagement for all faces in frame.
+        Prune face data for tracks that have left the scene.
+        Prevents memory leaks and ensures newly returned faces don't inherit old history.
+        """
+        now = datetime.now()
+        active_set = set(active_track_ids) if active_track_ids is not None else None
+        stale_keys = []
+        for k, v in self._face_data.items():
+            last_time = v.get('last_seen', v.get('created_at', now))
+            age = (now - last_time).total_seconds()
+            if active_set is not None:
+                if k not in active_set and age > max_age_seconds:
+                    stale_keys.append(k)
+            else:
+                if age > max_age_seconds:
+                    stale_keys.append(k)
+        for k in stale_keys:
+            del self._face_data[k]
+    
+    def track(
+        self, 
+        frame: np.ndarray, 
+        detections: Optional[List] = None,
+        track_ids: Optional[List[Any]] = None
+    ) -> List[Tuple[Any, EngagementMetrics]]:
+        """
+        Track engagement for all faces in frame, keyed by persistent track_ids.
         
         Args:
             frame: BGR image
             detections: Optional list of FaceDetection objects
+            track_ids: Optional list of persistent track IDs matching detections
         
         Returns:
-            List of (face_id, EngagementMetrics) tuples
+            List of (track_id, EngagementMetrics) tuples
         """
         results = []
         faces_data = self.analyzer.process(frame)
@@ -676,11 +706,12 @@ class EngagementTracker:
         else:
             matched_face_data = faces_data
         
-        for face_id, face_data in enumerate(matched_face_data):
+        for i, face_data in enumerate(matched_face_data):
+            face_key = track_ids[i] if (track_ids is not None and i < len(track_ids)) else i
             landmarks = face_data['landmarks']
             
-            # Get tracking data for this face
-            track_data = self._get_or_create_face_data(face_id)
+            # Get tracking data for this persistent face key
+            track_data = self._get_or_create_face_data(face_key)
             
             # Calculate EAR
             left_ear, right_ear = self.analyzer.calculate_ear(landmarks)
@@ -736,7 +767,7 @@ class EngagementTracker:
                 status=status
             )
             
-            results.append((face_id, metrics))
+            results.append((face_key, metrics))
         
         return results
     
@@ -854,7 +885,7 @@ class EngagementTracker:
         else:
             return EngagementStatus.SLEEPING
     
-    def get_face_metrics(self, face_id: int) -> Optional[EngagementMetrics]:
+    def get_face_metrics(self, face_id: Any) -> Optional[EngagementMetrics]:
         """Get latest metrics for a specific face."""
         if face_id in self._face_data:
             data = self._face_data[face_id]
@@ -863,7 +894,7 @@ class EngagementTracker:
                 return EngagementMetrics(engagement_score=score)
         return None
     
-    def reset(self, face_id: int = None):
+    def reset(self, face_id: Any = None):
         """Reset tracking data."""
         if face_id is not None:
             if face_id in self._face_data:

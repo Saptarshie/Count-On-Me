@@ -353,10 +353,7 @@ class SystemState:
             if d.bbox[2] >= min_size and d.bbox[3] >= min_size
         ]
         
-        # 3. Fast Engagement Tracking
-        engagement_results = self.engagement_tracker.track(frame, detections=valid_detections)
-        
-        # 4. Spatial Track Association
+        # 3. Spatial Track Association (Centroid Tracking)
         now = time.time()
         ttl = getattr(config.recognition, 'cache_ttl_seconds', 3.0)
         
@@ -409,6 +406,16 @@ class SystemState:
                     matched_tids.add(new_tid)
                     det_to_track.append(new_tid)
         
+        # 4. Fast Engagement Tracking (Keyed by persistent track ID)
+        engagement_results = self.engagement_tracker.track(
+            frame, 
+            detections=valid_detections,
+            track_ids=det_to_track
+        )
+        # Prune stale engagement histories for tracks that have left the scene
+        self.engagement_tracker.prune_stale_tracks(active_track_ids=list(self._tracks.keys()))
+        engagement_by_tid = {tid: eng for tid, eng in engagement_results}
+        
         # 5. Non-blocking Async Recognition Queue
         for det, tid in zip(valid_detections, det_to_track):
             with self._track_lock:
@@ -453,9 +460,7 @@ class SystemState:
                     result = RecognitionResult(name="Unknown", confidence=0.0, distance=1.0, is_known=False)
                     is_known = False
 
-            engagement = None
-            if idx < len(engagement_results):
-                _, engagement = engagement_results[idx]
+            engagement = engagement_by_tid.get(tid)
             if engagement is None:
                 engagement = EngagementMetrics(
                     head_pose=HeadPose(yaw=0.0, pitch=0.0, roll=0.0),

@@ -86,7 +86,7 @@ class RecognitionConfig:
     # Encoding & Batching settings
     encoding_model: str = "large"  # 'small' or 'large'
     num_jitters: int = 1  # Higher = more accurate but slower
-    batch_size: int = 4  # Max faces batched together in one forward pass
+    batch_size: int = 8  # Max faces batched together in one forward pass
     cache_ttl_seconds: float = 3.0  # Seconds to trust recognized identity for a track
     detector_backend: str = "skip"  # Skip redundant detection on already cropped faces
     
