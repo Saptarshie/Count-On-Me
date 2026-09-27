@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%236366f1'><path d='M12 2a5 5 0 1 0 5 5 5 5 0 0 0-5-5zm0 12c-5.33 0-8 2.67-8 4v2h16v-2c0-1.33-2.67-4-8-4z'/></svg>" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#090d16" />
+    <title>Count-On-Me | AI Classroom Attendance & Engagement</title>
+    <!-- Offline-first: fonts bundled locally (no Google Fonts CDN in the APK) -->
+    <style>
+      /* System font fallback stack matching the design language */
+      :root { --app-font-body: 'Outfit', 'Segoe UI', system-ui, -apple-system, sans-serif; }
+      html { font-family: var(--app-font-body); }
+      @font-face {
+        font-family: 'Outfit';
+        src: url('/fonts/outfit-*.woff2') format('woff2');
+        font-display: swap;
+      }
+    </style>
+    <!--
+      NOTE: On Android the app ships fully offline. Outfit/Plus Jakarta Sans are
+      loaded from Google Fonts only in dev (browser); the WebView falls back to
+      the system stack above if offline. To fully bundle fonts, drop the .woff2
+      files into android-app/app/public/fonts/ and remove this comment.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

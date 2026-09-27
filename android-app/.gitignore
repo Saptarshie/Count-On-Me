@@ -1,0 +1,17 @@
+# Android build outputs
+android-app/app/android/app/build/
+android-app/app/android/.gradle/
+android-app/app/android/build/
+android-app/app/android/local.properties
+android-app/app/android/capacitor-cordova-android-plugins/build/
+
+# Node
+android-app/app/node_modules/
+android-app/app/dist/
+
+# Test scratch
+_phone_snapshot.jpg
+_phone_export.csv
+_app_ui.png
+_batch.json
+_sess.json
