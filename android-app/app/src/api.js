@@ -85,6 +85,12 @@ export const getUnknownImageUrl = (filename) => {
   return `${base}/unknown/${filename}`;
 };
 
+// Reference photo used for embeddings + detection (student detail modal/cards).
+export const getStudentPhotoUrl = (studentId, index = 0) => {
+  const base = getBaseUrl();
+  return `${base}/api/students/${encodeURIComponent(studentId)}/photos/${index}`;
+};
+
 export const getBatchExportCsvUrl = (csvFilename) => {
   const base = getBaseUrl();
   // if backend gave relative or filename
@@ -192,7 +198,21 @@ export const api = {
   // Students
   getStudents: () => request('/api/students'),
   addStudent: (student) => request('/api/students', { method: 'POST', body: JSON.stringify(student) }),
+  updateStudent: (studentId, data) => request(`/api/students/${encodeURIComponent(studentId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data)
+  }),
   deleteStudent: (studentId) => request(`/api/students/${encodeURIComponent(studentId)}`, { method: 'DELETE' }),
+
+  // Student reference photos (embeddings + detection source images)
+  getStudentPhotos: (studentId) => request(`/api/students/${encodeURIComponent(studentId)}/photos`),
+  addStudentPhotos: (studentId, images) => request(`/api/students/${encodeURIComponent(studentId)}/photos`, {
+    method: 'POST',
+    body: JSON.stringify({ images })
+  }),
+  deleteStudentPhoto: (studentId, index) => request(`/api/students/${encodeURIComponent(studentId)}/photos/${index}`, {
+    method: 'DELETE'
+  }),
 
   // Full Registration (Images + DB + Live Encodings)
   registerStudent: (payload) => request('/api/register-student', { method: 'POST', body: JSON.stringify(payload) }),

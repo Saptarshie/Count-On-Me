@@ -132,7 +132,8 @@ export default function Navbar({ activeTab, setActiveTab, sysStats, onRefresh })
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          gap: '16px'
+          flexWrap: 'wrap',
+          gap: '12px'
         }}>
           {/* Logo / Branding */}
           <div 
@@ -142,7 +143,8 @@ export default function Navbar({ activeTab, setActiveTab, sysStats, onRefresh })
               alignItems: 'center', 
               gap: '12px', 
               cursor: 'pointer',
-              userSelect: 'none'
+              userSelect: 'none',
+              minWidth: 0
             }}
           >
             <div style={{
@@ -164,6 +166,7 @@ export default function Navbar({ activeTab, setActiveTab, sysStats, onRefresh })
                   fontWeight: 800, 
                   fontSize: '1.25rem',
                   letterSpacing: '-0.02em',
+                  whiteSpace: 'nowrap',
                   background: 'linear-gradient(90deg, #ffffff, #cbd5e1)',
                   WebkitBackgroundClip: 'text',
                   WebkitTextFillColor: 'transparent'
@@ -183,7 +186,7 @@ export default function Navbar({ activeTab, setActiveTab, sysStats, onRefresh })
                   AI
                 </span>
               </div>
-              <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 <span>Smart Attendance &amp; Engagement</span>
               </div>
             </div>
@@ -227,7 +230,7 @@ export default function Navbar({ activeTab, setActiveTab, sysStats, onRefresh })
           </nav>
 
           {/* System Control & Status Actions */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', justifyContent: 'flex-end', flexShrink: 0, maxWidth: '100%' }}>
             {/* System Status Pill */}
             <div style={{
               display: 'flex',

@@ -116,11 +116,10 @@ class EmbeddingStore(private val appContext: Context) {
     fun count(): Int = students.size
 
     /**
-     * Match an embedding against the whole gallery.
-     * Python: sims = K_norm @ enc_norm; accept iff best >= 1.0 - recognition_threshold.
-     * Returns (name, similarity) or null if below threshold.
+     * Best raw match against the whole gallery, REGARDLESS of threshold
+     * (Python recognize_batch: confidence = best similarity even for Unknown).
      */
-    fun match(embedding: FloatArray, minSimilarity: Double): RecognitionResult? {
+    fun bestMatch(embedding: FloatArray): RecognitionResult? {
         val enc = normalize(embedding)
         var bestName: String? = null
         var bestSim = -1.0
@@ -131,9 +130,17 @@ class EmbeddingStore(private val appContext: Context) {
                 if (sim > bestSim) { bestSim = sim; bestName = s.name }
             }
         }
-        if (bestName == null || bestSim < minSimilarity) return null
+        if (bestName == null) return null
         return RecognitionResult(bestName, bestSim, 1.0 - bestSim)
     }
+
+    /**
+     * Match an embedding against the whole gallery.
+     * Python: sims = K_norm @ enc_norm; accept iff best >= 1.0 - recognition_threshold.
+     * Returns (name, similarity) or null if below threshold.
+     */
+    fun match(embedding: FloatArray, minSimilarity: Double): RecognitionResult? =
+        bestMatch(embedding)?.takeIf { it.similarity >= minSimilarity }
 
     /** All embeddings of one student (used by batch dedup clustering). */
     fun vectorsOf(name: String): List<FloatArray> =

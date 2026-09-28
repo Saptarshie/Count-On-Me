@@ -95,7 +95,9 @@ class Engine(
     private val media = MediaPipeline(appContext)
     private val embedder = FaceEmbedder(appContext)
     private val store = EmbeddingStore(appContext)
-    private val recognizer = Recognizer(appContext, store, embedder)
+    private val recognizer = Recognizer(appContext, store, embedder).apply {
+        unknownCandidateSaver = { crop, key, sim -> saveUnknownCandidate(crop, key, sim) }
+    }
     private val engagement = EngagementAnalyzer()
     private val camera = CameraService(appContext)
 
@@ -104,6 +106,7 @@ class Engine(
     // live stats (SSE payload)
     val trackedStudents = ConcurrentHashMap<String, EngagementMetrics>()
     private val lastEngWrite = ConcurrentHashMap<String, Long>()
+    private val lastUnknownSave = ConcurrentHashMap<String, Long>()
     private var lastProcessedMs = 0L
     @Volatile var fps: Double = 0.0
         private set
@@ -263,10 +266,10 @@ class Engine(
             val box = t.box
             canvas.drawRect(box.x.toFloat(), box.y.toFloat(),
                 (box.x + box.w).toFloat(), (box.y + box.h).toFloat(), boxPaint)
-            val r = recognizer.resultFor(t)
-            val label = r?.name ?: (if (t.result != null) "Unknown" else "...")
-            val score = trackedStudents[r?.name ?: ""]?.engagementScore
-            val text = if (r?.name != null && score != null) "$label (${"%.0f".format(score)}%)"
+            val name = recognizer.confirmedName(t)
+            val label = name ?: "Identifying..."
+            val score = if (name != null) trackedStudents[name]?.engagementScore else null
+            val text = if (name != null && score != null) "$label (${"%.0f".format(score)}%)"
                        else label
             canvas.drawText(text, box.x + 4f, (box.y - 8).toFloat(), textPaint)
         }
@@ -296,6 +299,19 @@ class Engine(
         if (vecs.isEmpty()) return 0
         store.addStudent(studentId, name, vecs)
         return vecs.size
+    }
+
+    /**
+     * Replace a student's gallery entry with fresh embeddings from [images]
+     * (reference-photo add/delete). Drops both the studentId- and name-keyed
+     * entries first (the legacy /api/encode path keys by directory name).
+     * Empty [images] removes the student from the gallery entirely.
+     */
+    fun reregisterStudent(studentId: String, name: String, images: List<Bitmap>): Int {
+        store.removeStudent(studentId)
+        if (name != studentId) store.removeStudent(name)
+        if (images.isEmpty()) return 0
+        return registerStudent(studentId, name, images)
     }
 
     // ---------------- frame processing ----------------
@@ -354,14 +370,24 @@ class Engine(
         for (t in tracks) {
             val metrics = metricsByTrack[t.id]
             if (metrics == null) { engagement.estimate(t, null); continue }
-            val name = recognizer.resultFor(t)?.name
-            if (name != null) {
-                trackedStudents[name] = metrics
-                // throttled DB engagement write (Python 3 s throttle)
-                val last = lastEngWrite[name] ?: 0L
-                if (now - last >= ENGAGEMENT_WRITE_INTERVAL_MS) {
-                    lastEngWrite[name] = now
-                    db.writeEngagementScore(name, metrics.engagementScore)
+            // Python _process_frame section 6 parity: tracked_students,
+            // engagement writes and attendance marking happen ONLY for is_known
+            // tracks — i.e. temporal-voting consensus (3-of-5) reached.
+            val name = recognizer.confirmedName(t) ?: continue
+            trackedStudents[name] = metrics
+            // throttled DB engagement write (Python 3 s throttle)
+            val last = lastEngWrite[name] ?: 0L
+            if (now - last >= ENGAGEMENT_WRITE_INTERVAL_MS) {
+                lastEngWrite[name] = now
+                db.writeEngagementScore(name, metrics.engagementScore)
+            }
+            // Attendance: consensus + 30-min cooldown + active session.
+            // (Python can_mark_attendance -> mark_attendance; NOT gated behind
+            // the slow-path bitmap — that was why single-face marks never fired.)
+            if (autoAttendance && recognizer.canMarkAttendance(name)) {
+                if (db.markAttendance(name, metrics.engagementScore, db.activeSessionId())) {
+                    recognizer.markAttendanceLogged(name)
+                    Log.i(TAG, "Attendance marked: $name")
                 }
             }
         }
@@ -371,26 +397,17 @@ class Engine(
         //    boxes refresh at processing rate, video at camera rate)
         lastTracks = tracks.toList()
 
-        // 5) SLOW PATH: recognition enqueue (bitmap only when a crop is needed)
-        val needBitmap = tracks.any { t ->
-            val r = recognizer.resultFor(t)
-            r?.name == null && !t.inFlight && recognizer.consensus(t) == null &&
-                now - t.lastRecogMs >= Recognizer.RECOG_CACHE_TTL_MS
-        }
+        // 5) SLOW PATH: recognition refresh — every processed frame while a
+        //    track is unidentified (fast majority sampling), backing off to the
+        //    3 s cache TTL once its identity is confirmed (sticky).
+        val needBitmap = tracks.any { t -> recognizer.needsRecognition(t, now) }
         if (!needBitmap) return
         val tb0 = System.nanoTime()
         val bmp = frame.obtainScaledBitmap() ?: return
         perfBitmapMs = (System.nanoTime() - tb0) / 1e6
 
         for (t in tracks) {
-            val r = recognizer.resultFor(t)
-            if (r?.name != null) {
-                maybeMarkAttendance(t, r, now)
-            } else if (t.inFlight.not() && recognizer.consensus(t) == null) {
-                if (recognizer.maybeEnqueueRecognition(t, bmp)) {
-                    maybeSaveUnknown(t, bmp, now)
-                }
-            }
+            recognizer.maybeEnqueueRecognition(t, bmp)
         }
     }
 
@@ -401,33 +418,21 @@ class Engine(
         null
     }
 
-    private fun maybeMarkAttendance(t: Track, r: RecognitionResult, now: Long) {
-        if (!autoAttendance) return
-        val name = r.name ?: return
-        if (!recognizer.canMarkAttendance(name)) return
-        if (db.markAttendance(name, trackedStudents[name]?.engagementScore ?: 0.0,
-                              db.activeSessionId())) {
-            recognizer.markAttendanceLogged(name)
-            Log.i(TAG, "Attendance marked: $name")
+    /**
+     * Python _save_unknown_face parity: unconfirmed candidate faces
+     * (similarity >= min_confidence, per-track cooldown) enter the review queue.
+     * Invoked from the recognition worker with the actual recognition crop.
+     */
+    private fun saveUnknownCandidate(crop: Bitmap, trackKey: String, similarity: Double) {
+        if (similarity < UNKNOWN_SAVE_MIN_CONF) return
+        val now = System.currentTimeMillis()
+        val last = lastUnknownSave[trackKey] ?: 0L
+        if (now - last < UNKNOWN_SAVE_COOLDOWN_MS) return
+        lastUnknownSave[trackKey] = now
+        val jpeg = ByteArrayOutputStream().use { out ->
+            crop.compress(Bitmap.CompressFormat.JPEG, 85, out); out.toByteArray()
         }
-    }
-
-    private fun maybeSaveUnknown(t: Track, frame: Bitmap, now: Long) {
-        val r = t.result
-        if (r != null && r.similarity >= UNKNOWN_SAVE_MIN_CONF
-            && now - t.lastUnknownSaveMs >= UNKNOWN_SAVE_COOLDOWN_MS) {
-            t.lastUnknownSaveMs = now
-            val crop = Bitmap.createBitmap(frame,
-                t.box.x.coerceIn(0, frame.width - 1),
-                t.box.y.coerceIn(0, frame.height - 1),
-                t.box.w.coerceAtMost(frame.width - t.box.x),
-                t.box.h.coerceAtMost(frame.height - t.box.y), null, false)
-            val jpeg = ByteArrayOutputStream().use { out ->
-                crop.compress(Bitmap.CompressFormat.JPEG, 85, out); out.toByteArray()
-            }
-            crop.recycle()
-            unknownQueue.saveUnknownFace(jpeg, "t_${t.id}")
-        }
+        unknownQueue.saveUnknownFace(jpeg, trackKey)
     }
 
     private fun pruneTracked(now: Long) {

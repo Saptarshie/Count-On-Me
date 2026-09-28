@@ -1110,6 +1110,173 @@ def api_delete_student(student_id):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/students/<student_id>', methods=['PATCH', 'PUT'])
+def api_update_student(student_id):
+    """Update editable student details (name/email/department)."""
+    if not state.db_service:
+        return jsonify({'error': 'Database not initialized'}), 500
+    data = request.json or {}
+    fields = {k: v for k, v in data.items() if k in ('name', 'email', 'department')}
+    if 'name' in fields and not str(fields['name']).strip():
+        return jsonify({'error': 'Name cannot be empty'}), 400
+    if not fields:
+        return jsonify({'error': 'No editable fields provided'}), 400
+    try:
+        ok = state.db_service.students.update_student(student_id, **fields)
+        return jsonify({'status': 'success' if ok else 'not_found'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+def _student_photo_dir(student_id):
+    """Resolve a student's dataset photo folder (register convention: dataset/<name>/)."""
+    base = Path(config.recognition.dataset_path)
+    name = student_id
+    if state.db_service:
+        try:
+            for s in state.db_service.students.get_all_students():
+                if s.student_id == student_id:
+                    name = s.name
+                    break
+        except Exception:
+            pass
+    d = base / name
+    if d.is_dir():
+        return d
+    d2 = base / student_id
+    if d2.is_dir():
+        return d2
+    return d
+
+
+def _photo_files(d):
+    if not d or not d.is_dir():
+        return []
+    return sorted(
+        p for p in d.iterdir()
+        if p.is_file() and p.suffix.lower() in ('.jpg', '.jpeg', '.png')
+    )
+
+
+def _student_name_by_id(student_id):
+    if state.db_service:
+        try:
+            for s in state.db_service.students.get_all_students():
+                if s.student_id == student_id:
+                    return s.name
+        except Exception:
+            pass
+    return student_id
+
+
+def _reencode_student_photos(student_id, name):
+    """Rebuild the gallery entry from folder contents (replace semantics)."""
+    if not state.recognizer:
+        return 0
+    imgs = []
+    for p in _photo_files(_student_photo_dir(student_id)):
+        arr = np.fromfile(str(p), dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is not None:
+            imgs.append(img)
+    gallery_key = name.lower().replace(' ', '_')
+    if not imgs:
+        se = state.recognizer.dataset_encoder.student_encodings
+        se.pop(gallery_key, None)
+        state.recognizer.dataset_encoder.save_encodings()
+        state.recognizer.reload_encodings()
+        return 0
+    ok = state.recognizer.add_new_student(name, imgs)
+    # add_new_student appends to known_*; reload rebuilds without duplicates
+    state.recognizer.reload_encodings()
+    return len(imgs) if ok else 0
+
+
+@app.route('/api/students/<student_id>/photos', methods=['GET'])
+def api_get_student_photos(student_id):
+    """List reference photos used for embeddings/detection."""
+    files = _photo_files(_student_photo_dir(student_id))
+    return jsonify({
+        'photos': [
+            {'index': i, 'name': p.name, 'url': f'/api/students/{student_id}/photos/{i}'}
+            for i, p in enumerate(files)
+        ],
+        'count': len(files)
+    })
+
+
+@app.route('/api/students/<student_id>/photos/<int:index>', methods=['GET'])
+def api_get_student_photo(student_id, index):
+    """Serve one reference photo."""
+    files = _photo_files(_student_photo_dir(student_id))
+    if index < 0 or index >= len(files):
+        return jsonify({'error': 'Photo not found'}), 404
+    return send_file(str(files[index]))
+
+
+@app.route('/api/students/<student_id>/photos', methods=['POST'])
+def api_add_student_photos(student_id):
+    """Add base64 reference photos and re-encode the student (replace semantics)."""
+    data = request.json or {}
+    images_b64 = data.get('images') or []
+    if not images_b64:
+        return jsonify({'error': 'images array is required'}), 400
+    try:
+        name = _student_name_by_id(student_id)
+        d = _student_photo_dir(student_id)
+        d.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        added = 0
+        for i, b64 in enumerate(images_b64):
+            try:
+                if ',' in b64 and b64.strip().startswith('data:'):
+                    b64 = b64.split(',', 1)[1]
+                import base64 as _b64
+                img_bytes = _b64.b64decode(b64)
+                arr = np.frombuffer(img_bytes, dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if img is None:
+                    continue
+                out = d / f"web_{timestamp}_{added}.jpg"
+                if cv2.imwrite(str(out), img):
+                    added += 1
+            except Exception:
+                continue
+        if added == 0:
+            return jsonify({'error': 'No valid face images received'}), 400
+        encoded = _reencode_student_photos(student_id, name)
+        return jsonify({
+            'status': 'success',
+            'added': added,
+            'photo_count': len(_photo_files(d)),
+            'encoded': encoded > 0
+        })
+    except Exception as e:
+        logger.error(f"Add student photos failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/students/<student_id>/photos/<int:index>', methods=['DELETE'])
+def api_delete_student_photo(student_id, index):
+    """Delete one reference photo and re-encode the student."""
+    try:
+        name = _student_name_by_id(student_id)
+        d = _student_photo_dir(student_id)
+        files = _photo_files(d)
+        if index < 0 or index >= len(files):
+            return jsonify({'error': 'Photo not found'}), 404
+        files[index].unlink()
+        encoded = _reencode_student_photos(student_id, name)
+        return jsonify({
+            'status': 'success',
+            'remaining': len(_photo_files(d)),
+            'encoded': encoded > 0
+        })
+    except Exception as e:
+        logger.error(f"Delete student photo failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/encode', methods=['POST'])
 def api_encode_dataset():
     """Encode/re-encode the face dataset."""

@@ -596,11 +596,11 @@ export default function AttendanceView({ onSessionChange }) {
             </p>
             <button
               className="btn btn-primary"
-              style={{ fontSize: '0.8rem', padding: '6px 14px' }}
+              style={{ fontSize: '0.8rem', padding: '6px 14px', whiteSpace: 'normal', maxWidth: '100%' }}
               onClick={() => setNewSessionModalOpen(true)}
             >
               <Plus size={14} />
-              <span>Create First Session (e.g. Physics, Chemistry)</span>
+              <span>Create First Session</span>
             </button>
           </div>
         )}
@@ -665,7 +665,7 @@ export default function AttendanceView({ onSessionChange }) {
           }}>
             <Clock size={22} />
           </div>
-          <div style={{ overflow: 'hidden' }}>
+          <div style={{ overflow: 'hidden', minWidth: 0 }}>
             <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>Target Session</span>
             <h3 style={{ fontSize: '1rem', fontWeight: 700, color: '#f8fafc', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>
               {currentSelectedSession ? currentSelectedSession.title : 'All Combined'}
@@ -685,7 +685,7 @@ export default function AttendanceView({ onSessionChange }) {
           gap: '12px'
         }}>
           <div>
-            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', minWidth: 0 }}>
               <span>Session Roster ({filteredRecords.length})</span>
               {currentSelectedSession && (
                 <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#818cf8', background: 'rgba(99, 102, 241, 0.15)', padding: '2px 8px', borderRadius: '6px' }}>
@@ -724,9 +724,9 @@ export default function AttendanceView({ onSessionChange }) {
           </div>
         </div>
 
-        {/* Table */}
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
+        {/* Table — horizontally scrollable inside the card on narrow screens */}
+        <div style={{ overflowX: 'auto', maxWidth: '100%' }}>
+          <table style={{ width: '100%', minWidth: '640px', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
             <thead>
               <tr style={{ borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-dim)', textAlign: 'left' }}>
                 <th style={{ padding: '12px 10px', width: '40px' }}>#</th>
@@ -881,7 +881,7 @@ export default function AttendanceView({ onSessionChange }) {
                           onClick={() => setMarkStudentModalOpen(true)}
                         >
                           <UserPlus size={14} />
-                          <span>+ Mark Student Manually</span>
+                          <span>+ Mark Student</span>
                         </button>
                       </div>
                     )}

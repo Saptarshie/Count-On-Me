@@ -26,15 +26,26 @@ class Recognizer(
         private const val TAG = "Recognizer"
         const val MAX_ASSOC_DISTANCE = 110.0          // px, Python line 375
         const val TRACK_EXPIRY_MS = 3000L             // Python 3.0 s
-        const val RECOG_CACHE_TTL_MS = 3000L          // Python cache_ttl_seconds
-        const val VOTE_WINDOW = 5                     // window_frames
-        const val MIN_VOTES = 3                       // min_votes
+        const val RECOG_CACHE_TTL_MS = 3000L          // Python cache_ttl_seconds (post-confirm refresh)
+        const val FAST_RECOG_INTERVAL_MS = 150L       // unconfirmed: sample every processed frame
+        const val VOTE_WINDOW = 5                     // last N observations (4-5 consecutive frames)
+        const val MIN_VOTES = 3                       // 3-of-5 majority to confirm an identity
+        const val CONFIRM_SIM_FLOOR = 0.50            // junk-vote similarity floor for confirmation
+        const val CHALLENGER_MIN_VOTES = 3             // fresh votes a challenger needs to unseat
+        const val CHALLENGER_LEAD = 2                 // hysteresis: challenger must lead by 2
         const val ATTENDANCE_COOLDOWN_MS = 30L * 60 * 1000  // 30 min
         const val DEFAULT_THRESHOLD = 0.6             // Python recognition_threshold (distance)
     }
 
     /** Tunables mirrored from /api/tuning */
     @Volatile var recognitionThreshold = DEFAULT_THRESHOLD
+
+    /**
+     * Unconfirmed face candidates (Python _save_unknown_face): invoked with the
+     * recognition crop when a job completes without a 3-of-5 consensus.
+     * Wired by Engine to the unknown-faces review queue.
+     */
+    var unknownCandidateSaver: ((Bitmap, String, Double) -> Unit)? = null
 
     /** The async worker executing slow-path embeddings (one at a time, like Python's single worker thread). */
     private val worker = Thread {
@@ -44,12 +55,27 @@ class Recognizer(
                 val crop = job.crop
                 val emb = embedder.embed(crop)
                 if (emb != null) {
-                    val res = store.match(emb, 1.0 - recognitionThreshold)
+                    // Python recognize_batch parity: keep the raw best match
+                    // (confidence = best similarity even when below threshold),
+                    // then accept only above 1.0 - recognition_threshold.
+                    val raw = store.bestMatch(emb)
+                    val res = raw?.takeIf { it.similarity >= 1.0 - recognitionThreshold }
                     job.track.result = res
                     job.track.inFlight = false
                     job.track.lastRecogMs = System.currentTimeMillis()
-                    // Temporal voting (Python TemporalVotingRecognizer.observe)
-                    if (res != null) observeVote(job.track, res)
+                    // Temporal voting (Python TemporalVotingRecognizer.observe):
+                    // EVERY completed job votes, including "Unknown" ones —
+                    // otherwise consensus can never accumulate.
+                    val accepted = observeVote(
+                        job.track,
+                        res?.name ?: "Unknown",
+                        raw?.similarity ?: 0.0
+                    )
+                    // Python _save_unknown_face: unconfirmed faces with
+                    // similarity >= min_confidence enter the review queue.
+                    if (accepted == null && raw != null) {
+                        unknownCandidateSaver?.invoke(crop, "t_${job.track.id}", raw.similarity)
+                    }
                 } else {
                     job.track.inFlight = false
                 }
@@ -74,6 +100,7 @@ class Recognizer(
     fun updateTracks(boxes: List<FaceBox>, nowMs: Long): List<Track> {
         // expire stale
         tracks.values.removeIf { nowMs - it.lastSeenMs > TRACK_EXPIRY_MS }
+        votes.keys.retainAll(tracks.keys)
 
         val unmatched = ArrayList(boxes)
         // greedy nearest-center association
@@ -107,9 +134,19 @@ class Recognizer(
      * Returns the crop bitmap to enqueue, or null (still cached / in flight).
      * Python lines 419-438.
      */
-    fun maybeEnqueueRecognition(track: Track, fullFrame: Bitmap): Boolean {
+    /**
+     * Recognition sampling cadence: every processed frame while unidentified
+     * (the majority vote needs consecutive samples fast — ~1s to confirm),
+     * backing off to the Python cache TTL once the identity is confirmed.
+     */
+    fun needsRecognition(track: Track, nowMs: Long): Boolean {
         if (track.inFlight) return false
-        if (System.currentTimeMillis() - track.lastRecogMs < RECOG_CACHE_TTL_MS) return false
+        val interval = if (confirmedName(track) == null) FAST_RECOG_INTERVAL_MS else RECOG_CACHE_TTL_MS
+        return nowMs - track.lastRecogMs >= interval
+    }
+
+    fun maybeEnqueueRecognition(track: Track, fullFrame: Bitmap): Boolean {
+        if (!needsRecognition(track, System.currentTimeMillis())) return false
         val crop = cropFace(fullFrame, track.box.expanded(0.1)) ?: return false
         track.inFlight = true
         if (!jobQueue.offer(RecogJob(track, crop))) track.inFlight = false
@@ -123,38 +160,102 @@ class Recognizer(
         val h = box.h.coerceAtMost(frame.height - y).coerceAtLeast(8)
         return Bitmap.createBitmap(frame, x, y, w, h, null, false)
     }
+    /**
+     * Per-track identity voting: a rolling window of the last VOTE_WINDOW raw
+     * observations (name, similarity). A name confirms at a MIN_VOTES-of-window
+     * majority with a similarity floor. The confirmed identity is STICKY
+     * (hysteresis): a challenger needs CHALLENGER_MIN_VOTES fresh votes AND a
+     * CHALLENGER_LEAD advantage to unseat it — one noisy embed can never flip
+     * a confirmed label. Unconfirmed tracks show "Identifying...", never a guess.
+     */
     private class VoteWindow {
-        val sims = HashMap<String, ArrayDeque<Double>>()
+        val obs = ArrayDeque<Pair<String, Double>>()
+        var confirmedName: String? = null
+        var confirmedSim = 0.0
+        val sinceConfirm = ArrayList<Pair<String, Double>>()
     }
+
     private val votes = ConcurrentHashMap<Int, VoteWindow>()
 
-    private fun observeVote(track: Track, result: RecognitionResult) {
+    /** Observe one raw recognition result. Returns the sticky confirmed name (null while unconfirmed). */
+    private fun observeVote(track: Track, name: String, similarity: Double): String? {
         val w = votes.computeIfAbsent(track.id) { VoteWindow() }
-        val name = result.name ?: return
-        val dq = w.sims.computeIfAbsent(name) { ArrayDeque() }
-        dq.addLast(result.similarity)
-        // trim every candidate to last VOTE_WINDOW entries
-        for ((_, v) in w.sims) while (v.size > VOTE_WINDOW) v.removeFirst()
-    }
-
-    /** Consensus name or null. Python get_consensus: winner needs >= MIN_VOTES. */
-    fun consensus(track: Track): String? {
-        val w = votes[track.id] ?: return null
-        var bestName: String? = null
-        var bestCount = 0
-        for ((name, dq) in w.sims) {
-            if (name == "Unknown") continue
-            if (dq.size > bestCount) { bestCount = dq.size; bestName = name }
+        synchronized(w) {
+            w.obs.addLast(name to similarity)
+            while (w.obs.size > VOTE_WINDOW) w.obs.removeFirst()
+            if (w.confirmedName == null) {
+                confirmFromWindow(w)
+            } else {
+                w.sinceConfirm.add(name to similarity)
+                while (w.sinceConfirm.size > VOTE_WINDOW * 2) w.sinceConfirm.removeAt(0)
+                maybeSwapConfirmed(w)
+            }
+            return w.confirmedName
         }
-        return if (bestCount >= MIN_VOTES) bestName else null
     }
 
-    /** Current effective result for a track (consensus > cache). */
+    private fun confirmFromWindow(w: VoteWindow) {
+        val t = majority(w.obs) ?: return
+        if (t.count < MIN_VOTES || t.avg < CONFIRM_SIM_FLOOR) return
+        if (t.count <= t.runnerUp) return  // need a strict majority of the window
+        w.confirmedName = t.name
+        w.confirmedSim = t.avg
+        w.sinceConfirm.clear()
+    }
+
+    private fun maybeSwapConfirmed(w: VoteWindow) {
+        val confirmed = w.confirmedName ?: return
+        // Fresh votes since confirmation decide whether a challenger unseats
+        // the sticky identity (person-swap safety with hysteresis).
+        val challengerObs = w.sinceConfirm.filter { it.first != confirmed && it.first != "Unknown" }
+        val confirmedFresh = w.sinceConfirm.count { it.first == confirmed }
+        val t = majority(challengerObs) ?: return
+        if (t.count >= CHALLENGER_MIN_VOTES && t.count - confirmedFresh >= CHALLENGER_LEAD
+            && t.avg >= CONFIRM_SIM_FLOOR) {
+            w.confirmedName = t.name
+            w.confirmedSim = t.avg
+            w.sinceConfirm.clear()
+        }
+    }
+
+    private data class Tally(val name: String, val count: Int, val avg: Double, val runnerUp: Int)
+
+    /**
+     * Best candidate over [obs] with runner-up count. Ties break on higher
+     * average similarity. "Unknown" votes carry no identity and are ignored
+     * (Python get_consensus parity).
+     */
+    private fun majority(obs: Collection<Pair<String, Double>>): Tally? {
+        val counts = HashMap<String, Int>()
+        val sims = HashMap<String, Double>()
+        for ((n, s) in obs) {
+            if (n == "Unknown") continue
+            counts[n] = (counts[n] ?: 0) + 1
+            sims[n] = (sims[n] ?: 0.0) + s
+        }
+        if (counts.isEmpty()) return null
+        var best = ""
+        var bestCount = -1
+        var bestAvg = 0.0
+        for ((n, c) in counts) {
+            val avg = (sims[n] ?: 0.0) / c
+            if (c > bestCount || (c == bestCount && avg > bestAvg)) {
+                best = n; bestCount = c; bestAvg = avg
+            }
+        }
+        val runnerUp = counts.filterKeys { it != best }.values.maxOrNull() ?: 0
+        return Tally(best, bestCount, bestAvg, runnerUp)
+    }
+
+    /** Sticky confirmed identity for a track, or null while unconfirmed. */
+    fun confirmedName(track: Track): String? = votes[track.id]?.confirmedName
+
+    /** Current effective result for a track (sticky confirmed identity only). */
     fun resultFor(track: Track): RecognitionResult? {
-        consensus(track)?.let { name ->
-            return track.result?.takeIf { it.name == name } ?: RecognitionResult(name, 0.5, 0.5)
-        }
-        return track.result
+        val w = votes[track.id] ?: return null
+        val name = w.confirmedName ?: return null
+        val sim = if (track.result?.name == name) track.result!!.similarity else w.confirmedSim
+        return RecognitionResult(name, sim, 1.0 - sim)
     }
 
     // ---- Attendance cooldown (Python can_mark_attendance) ----

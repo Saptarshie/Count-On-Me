@@ -129,9 +129,10 @@ export default function RegisterView({ onStudentRegistered }) {
     }, 600);
   };
 
-  // Handle file or phone camera upload
+  // Handle file or phone camera upload (appends to previously captured photos)
   const handleFiles = (e) => {
     const files = Array.from(e.target.files || []);
+    e.target.value = '';
     if (!files.length) return;
 
     files.forEach(file => {
@@ -436,7 +437,6 @@ export default function RegisterView({ onStudentRegistered }) {
                 type="file"
                 accept="image/*"
                 multiple
-                capture="user"
                 onChange={handleFiles}
                 style={{ display: 'none' }}
               />
@@ -451,16 +451,28 @@ export default function RegisterView({ onStudentRegistered }) {
         {/* Thumbnail Carousel / Grid */}
         {capturedImages.length > 0 && (
           <div className="glass-panel" style={{ padding: '20px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap', gap: '8px' }}>
               <h3 style={{ fontSize: '1rem', fontWeight: 600 }}>Captured Photos ({capturedImages.length})</h3>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => setCapturedImages([])}
-                style={{ padding: '4px 10px', fontSize: '0.75rem' }}
-              >
-                Clear All
-              </button>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => fileInputRef.current?.click()}
+                  style={{ padding: '4px 10px', fontSize: '0.75rem' }}
+                  title="Add more face photos (camera or gallery)"
+                >
+                  <Camera size={13} />
+                  <span>Add Another Photo</span>
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setCapturedImages([])}
+                  style={{ padding: '4px 10px', fontSize: '0.75rem' }}
+                >
+                  Clear All
+                </button>
+              </div>
             </div>
 
             <div style={{

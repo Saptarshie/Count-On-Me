@@ -366,6 +366,32 @@ class Database(context: Context) : Engine.DbBridge {
         }
     }
 
+    /** Single student row by student_id (Python get_student). */
+    fun getStudent(studentId: String): Map<String, Any?>? = try {
+        withDb { db ->
+            queryOne(db, "SELECT * FROM students WHERE student_id = ? LIMIT 1", arrayOf(studentId))
+        }
+    } catch (t: Throwable) {
+        Log.e(TAG, "getStudent failed for $studentId", t)
+        null
+    }
+
+    /** Update editable student fields (StudentRepository.update_student parity). */
+    fun updateStudent(studentId: String, name: String, email: String?, dept: String?): Boolean {
+        return try {
+            withDb { db ->
+                val cv = ContentValues()
+                cv.put("name", name)
+                cv.put("email", email)
+                cv.put("department", dept)
+                db.update("students", cv, "student_id = ?", arrayOf(studentId))
+            }.also { clearActiveSessionCache() } > 0
+        } catch (t: Throwable) {
+            Log.e(TAG, "updateStudent failed for $studentId", t)
+            false
+        }
+    }
+
     // ---------------- Sessions CRUD ----------------
 
     /**

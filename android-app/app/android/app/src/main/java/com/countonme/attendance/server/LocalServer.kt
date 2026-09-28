@@ -285,7 +285,20 @@ class LocalServer(
                     }
                 }
                 "students" -> {
-                    if (seg.size == 3 && method == Method.DELETE) return apiDeleteStudent(seg[2])
+                    if (seg.size == 3) {
+                        if (method == Method.DELETE) return apiDeleteStudent(seg[2])
+                        if (method == Method.PATCH || method == Method.PUT) return apiUpdateStudent(seg[2], session)
+                    }
+                    if (seg.size >= 4 && seg[3] == "photos") {
+                        val sid = seg[2]
+                        if (seg.size == 4 && method == Method.GET) return apiListStudentPhotos(sid)
+                        if (seg.size == 4 && method == Method.POST) return apiAddStudentPhotos(sid, session)
+                        if (seg.size == 5 && seg[4].toIntOrNull() != null) {
+                            val idx = seg[4].toInt()
+                            if (method == Method.GET) return apiGetStudentPhoto(sid, idx)
+                            if (method == Method.DELETE) return apiDeleteStudentPhoto(sid, idx)
+                        }
+                    }
                 }
             }
         }
@@ -301,6 +314,9 @@ class LocalServer(
         }
         return try {
             engine.start(lifecycleOwner)
+            // Foreground service keeps OEM freezers (ColorOS Hans etc.) from
+            // suspending the camera/server while the user switches apps.
+            com.countonme.attendance.EngineService.start(appContext)
             jsonResponse("""{"status": "started"}""")
         } catch (t: Throwable) {
             jsonError(Response.Status.INTERNAL_ERROR, "Failed to start camera: ${t.message}")
@@ -310,6 +326,10 @@ class LocalServer(
     private fun apiStop(): Response {
         try {
             engine.stop()
+        } catch (_: Throwable) {
+        }
+        try {
+            com.countonme.attendance.EngineService.stop(appContext)
         } catch (_: Throwable) {
         }
         return jsonResponse("""{"status": "stopped"}""")
@@ -595,6 +615,195 @@ class LocalServer(
         return jsonResponse(
             JSONObject().put("status", if (success) "success" else "not_found").toString()
         )
+    }
+
+    /** PATCH /api/students/{id} — update editable details (name/email/department). */
+    private fun apiUpdateStudent(studentId: String, session: IHTTPSession): Response {
+        val row = db.getStudent(studentId)
+            ?: return jsonError(Response.Status.NOT_FOUND, "Student not found")
+        val body = readJsonBody(session)
+        val oldName = row["name"]?.toString() ?: studentId
+        val name = if (body.has("name")) body.optString("name").trim() else oldName
+        if (name.isEmpty()) return jsonError(Response.Status.BAD_REQUEST, "Name cannot be empty")
+        val email = if (body.has("email")) body.optString("email").ifBlank { null }
+            else row["email"]?.toString()
+        val dept = if (body.has("department")) body.optString("department").ifBlank { null }
+            else row["department"]?.toString()
+
+        if (!db.updateStudent(studentId, name, email, dept)) {
+            return jsonError(Response.Status.INTERNAL_ERROR, "Update failed")
+        }
+
+        var reencoded = false
+        if (oldName != name) {
+            // Photo folder follows the name (register convention) — rename it
+            // and refresh the gallery label (attendance history keeps old names).
+            val base = File(appContext.filesDir, "dataset")
+            val oldDir = File(base, oldName)
+            val newDir = File(base, name)
+            if (oldDir.isDirectory && !newDir.exists()) oldDir.renameTo(newDir)
+            val photos = listPhotoFiles(if (newDir.isDirectory) newDir else oldDir)
+                .mapNotNull { decodeBitmap(it) }
+            if (photos.isNotEmpty()) {
+                engine.reregisterStudent(studentId, name, photos)
+                photos.forEach { it.recycle() }
+                reencoded = true
+            }
+        }
+        return jsonResponse(
+            JSONObject().put("status", "success").put("name", name)
+                .put("reencoded", reencoded).toString()
+        )
+    }
+
+    // ---------------- student reference photos ----------------
+
+    /**
+     * Photo folder for a student: dataset/[name] (register convention),
+     * falling back to dataset/[student_id]. The returned dir may not exist
+     * yet (POST creates it).
+     */
+    private fun studentPhotoDir(studentId: String): File? {
+        val row = db.getStudent(studentId) ?: return null
+        val name = row["name"]?.toString() ?: studentId
+        val base = File(appContext.filesDir, "dataset")
+        val byName = File(base, name)
+        if (byName.isDirectory) return byName
+        val byId = File(base, studentId)
+        if (byId.isDirectory) return byId
+        return byName
+    }
+
+    private fun listPhotoFiles(dir: File): List<File> =
+        (dir.listFiles { f ->
+            f.isFile && (f.extension.equals("jpg", true) || f.extension.equals("jpeg", true) || f.extension.equals("png", true))
+        } ?: emptyArray()).sortedBy { it.name }
+
+    /** GET /api/students/{id}/photos — reference photo list. */
+    private fun apiListStudentPhotos(studentId: String): Response {
+        val dir = studentPhotoDir(studentId)
+            ?: return jsonError(Response.Status.NOT_FOUND, "Student not found")
+        val files = listPhotoFiles(dir)
+        val arr = JSONArray()
+        files.forEachIndexed { i, f ->
+            arr.put(
+                JSONObject()
+                    .put("index", i)
+                    .put("name", f.name)
+                    .put("url", "/api/students/$studentId/photos/$i")
+            )
+        }
+        return jsonResponse(
+            JSONObject().put("photos", arr).put("count", files.size).toString()
+        )
+    }
+
+    /** GET /api/students/{id}/photos/{index} — one reference photo (JPEG/PNG). */
+    private fun apiGetStudentPhoto(studentId: String, index: Int): Response {
+        val dir = studentPhotoDir(studentId)
+            ?: return jsonError(Response.Status.NOT_FOUND, "Student not found")
+        val files = listPhotoFiles(dir)
+        if (index < 0 || index >= files.size) {
+            return jsonError(Response.Status.NOT_FOUND, "Photo not found")
+        }
+        val f = files[index]
+        val mime = when {
+            f.extension.equals("png", true) -> "image/png"
+            else -> "image/jpeg"
+        }
+        return try {
+            val resp = NanoHTTPD.newFixedLengthResponse(
+                Response.Status.OK, mime, f.inputStream(), f.length()
+            )
+            resp.addHeader("Cache-Control", "no-cache")
+            resp
+        } catch (t: Throwable) {
+            jsonError(Response.Status.INTERNAL_ERROR, t.message ?: "Read failed")
+        }
+    }
+
+    /**
+     * POST /api/students/{id}/photos — add base64 images and re-encode the
+     * student's gallery entry from ALL photos (replace semantics).
+     */
+    private fun apiAddStudentPhotos(studentId: String, session: IHTTPSession): Response {
+        val row = db.getStudent(studentId)
+            ?: return jsonError(Response.Status.NOT_FOUND, "Student not found")
+        val name = row["name"]?.toString() ?: studentId
+        val body = readJsonBody(session)
+        val images = body.optJSONArray("images")
+        if (images == null || images.length() == 0) {
+            return jsonError(Response.Status.BAD_REQUEST, "images array is required")
+        }
+        return try {
+            val dir = studentPhotoDir(studentId) ?: return jsonError(Response.Status.NOT_FOUND, "Student not found")
+            dir.mkdirs()
+            val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            var added = 0
+            for (i in 0 until images.length()) {
+                val raw = stripDataUrlPrefix(images.optString(i) ?: "") ?: continue
+                val bytes = try {
+                    Base64.decode(raw, Base64.DEFAULT)
+                } catch (_: Throwable) { continue }
+                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: continue
+                val out = File(dir, "web_${ts}_${System.nanoTime() % 100000}_$added.jpg")
+                if (out.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 92, it) }) added++
+                bmp.recycle()
+            }
+            if (added == 0) {
+                return jsonError(Response.Status.BAD_REQUEST, "No valid face images received")
+            }
+            val encoded = reencodeStudentPhotos(studentId, name)
+            val count = listPhotoFiles(dir).size
+            jsonResponse(
+                JSONObject()
+                    .put("status", "success")
+                    .put("added", added)
+                    .put("photo_count", count)
+                    .put("encoded", encoded)
+                    .toString()
+            )
+        } catch (t: Throwable) {
+            jsonError(Response.Status.INTERNAL_ERROR, t.message ?: "Add photos failed")
+        }
+    }
+
+    /** DELETE /api/students/{id}/photos/{index} — remove one photo + re-encode. */
+    private fun apiDeleteStudentPhoto(studentId: String, index: Int): Response {
+        val row = db.getStudent(studentId)
+            ?: return jsonError(Response.Status.NOT_FOUND, "Student not found")
+        val name = row["name"]?.toString() ?: studentId
+        val dir = studentPhotoDir(studentId)
+            ?: return jsonError(Response.Status.NOT_FOUND, "Student not found")
+        val files = listPhotoFiles(dir)
+        if (index < 0 || index >= files.size) {
+            return jsonError(Response.Status.NOT_FOUND, "Photo not found")
+        }
+        return try {
+            files[index].delete()
+            val encoded = reencodeStudentPhotos(studentId, name)
+            val count = listPhotoFiles(dir).size
+            jsonResponse(
+                JSONObject()
+                    .put("status", "success")
+                    .put("remaining", count)
+                    .put("encoded", encoded)
+                    .toString()
+            )
+        } catch (t: Throwable) {
+            jsonError(Response.Status.INTERNAL_ERROR, t.message ?: "Delete failed")
+        }
+    }
+
+    /** Rebuild the gallery entry from folder contents (replace semantics). */
+    private fun reencodeStudentPhotos(studentId: String, name: String): Boolean {
+        val dir = studentPhotoDir(studentId) ?: return false
+        val photos = listPhotoFiles(dir).mapNotNull { decodeBitmap(it) }
+        return try {
+            engine.reregisterStudent(studentId, name, photos) > 0
+        } finally {
+            photos.forEach { it.recycle() }
+        }
     }
 
     // ---------------- dataset encode + register ----------------

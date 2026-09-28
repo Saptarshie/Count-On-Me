@@ -212,7 +212,7 @@ export default function LiveFeedView({ stats, setActiveTab, onRefresh }) {
         justifyContent: 'space-between',
         gap: '12px'
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0, flex: '1 1 auto' }}>
           <div style={{
             width: '40px',
             height: '40px',
@@ -221,7 +221,8 @@ export default function LiveFeedView({ stats, setActiveTab, onRefresh }) {
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            color: stats?.is_running ? '#34d399' : '#f87171'
+            color: stats?.is_running ? '#34d399' : '#f87171',
+            flexShrink: 0
           }}>
             {stats?.is_running ? <Video size={22} /> : <VideoOff size={22} />}
           </div>
@@ -232,7 +233,7 @@ export default function LiveFeedView({ stats, setActiveTab, onRefresh }) {
                 <>
                   <span className="pulse-indicator" />
                   <span style={{ color: '#34d399', fontWeight: 600 }}>Streaming Active</span>
-                  <span>•</span>
+                  <span style={{ opacity: 0.5 }}>&middot;</span>
                   <span>FPS: {Math.round(stats?.fps || 0)}</span>
                 </>
               ) : (
@@ -242,7 +243,7 @@ export default function LiveFeedView({ stats, setActiveTab, onRefresh }) {
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end', flex: '0 1 auto', minWidth: 0, maxWidth: '100%' }}>
           {stats?.is_running ? (
             <button
               className="btn btn-danger"
